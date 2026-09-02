@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from '@/components/ui/sheet'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
-import { HardHat, LayoutDashboard, Search, Bookmark, History, Database, Settings, Menu, LogOut } from 'lucide-react'
+import { HardHat, LayoutDashboard, Search, Bookmark, History, Database, Settings, Menu, LogOut, Terminal } from 'lucide-react'
 import DashboardView from './DashboardView'
 import DiscoverView from './DiscoverView'
 import SavedLeadsView from './SavedLeadsView'
@@ -14,6 +14,7 @@ import SearchHistoryView from './SearchHistoryView'
 import SourcesView from './SourcesView'
 import SettingsView from './SettingsView'
 import LeadDetail from './LeadDetail'
+import AdminView from './AdminView'
 
 const NAV = [
   { key: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
@@ -21,6 +22,7 @@ const NAV = [
   { key: 'saved', label: 'Saved Leads', icon: Bookmark },
   { key: 'history', label: 'Search History', icon: History },
   { key: 'sources', label: 'Sources', icon: Database },
+  { key: 'admin', label: 'Admin / Debug', icon: Terminal },
   { key: 'settings', label: 'Settings', icon: Settings },
 ]
 
@@ -63,6 +65,7 @@ export default function Shell({ auth, refreshAuth }) {
       case 'saved': return <SavedLeadsView onOpenLead={openLead} />
       case 'history': return <SearchHistoryView />
       case 'sources': return <SourcesView />
+      case 'admin': return <AdminView />
       case 'settings': return <SettingsView profile={profile} onUpdated={refreshAuth} />
       default: return null
     }

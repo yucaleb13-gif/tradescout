@@ -1,8 +1,11 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/app/lib/supabase/server'
 import { admin } from '@/app/lib/supabase/admin'
+import { runPipeline } from '@/app/lib/pipeline/engine'
+import { listConnectors } from '@/app/lib/connectors/registry'
 
 export const dynamic = 'force-dynamic'
+export const maxDuration = 60
 
 const json = (data, status = 200) => NextResponse.json(data, { status })
 
@@ -106,10 +109,42 @@ export async function POST(request, context) {
     return json(data, 201)
   }
 
+  // -------- SOURCES (create/approve) — writes via service role
+  if (path === 'sources') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    if (!body.name || !body.domain || !(body.base_url || body.config?.feed_url)) {
+      return json({ error: 'name, domain and base_url (or config.feed_url) are required' }, 400)
+    }
+    const { data, error } = await admin.from('sources').insert({
+      name: body.name, domain: body.domain, base_url: body.base_url || null,
+      source_type: body.source_type || 'other', connector: body.connector || 'generic_web',
+      is_active: body.is_active ?? true, robots_allowed: body.robots_allowed ?? null,
+      terms_ok: body.terms_ok ?? null, trust_level: body.trust_level ?? 50,
+      config: body.config || {}, is_demo: false,
+    }).select('*').single()
+    if (error) {
+      if (/duplicate|unique/i.test(error.message)) return json({ error: 'A source with this domain already exists' }, 409)
+      return json({ error: error.message }, 400)
+    }
+    return json(data, 201)
+  }
+
+  // -------- RUN PIPELINE (SOURCE -> RETRIEVE -> ... -> LEAD)
+  if (path === 'admin/run-pipeline') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    if (!body.source_id) return json({ error: 'source_id is required' }, 400)
+    try {
+      const result = await runPipeline({ sourceId: body.source_id, userId })
+      return json(result)
+    } catch (e) {
+      return json({ error: e.message }, 400)
+    }
+  }
+
   return json({ error: 'Not found' }, 404)
 }
-
-// ------------------------------------------------------------------- GET
 export async function GET(request, context) {
   const parts = (await context.params)?.path || []
   const path = parts.join('/')
@@ -216,6 +251,39 @@ export async function GET(request, context) {
     return json(data || [])
   }
 
+  if (path === 'connectors') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    return json(listConnectors())
+  }
+
+  // -------- ADMIN / DEBUG: pipeline runs
+  if (path === 'admin/runs') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    const { data, error } = await supabase
+      .from('search_runs').select('*').order('created_at', { ascending: false }).limit(50)
+    if (error) return json({ error: error.message }, 400)
+    return json(data || [])
+  }
+
+  if (parts[0] === 'admin' && parts[1] === 'runs' && parts[2]) {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    const runId = parts[2]
+    const { data: run, error } = await supabase.from('search_runs').select('*').eq('id', runId).single()
+    if (error) return json({ error: 'Run not found' }, 404)
+    const { data: retrievals } = await supabase.from('retrievals')
+      .select('id, source_url, source_domain, source_title, http_status, retrieval_status, content_hash, byte_size, error, retrieved_at')
+      .eq('run_id', runId).order('retrieved_at', { ascending: true })
+    const { data: logs } = await supabase.from('pipeline_logs')
+      .select('*').eq('run_id', runId).order('created_at', { ascending: true })
+    const { data: leads } = await supabase.from('leads')
+      .select('id, project_name, trade_category, location, verification_status, source_url')
+      .eq('search_run_id', runId).order('created_at', { ascending: true })
+    return json({ ...run, retrievals: retrievals || [], logs: logs || [], leads: leads || [] })
+  }
+
   return json({ error: 'Not found' }, 404)
 }
 
@@ -256,6 +324,18 @@ export async function PATCH(request, context) {
     const { data, error } = await supabase
       .from('saved_leads').update(patch).eq('id', parts[1]).eq('profile_id', userId)
       .select('*, lead:leads(*, source:sources(name, domain))').single()
+    if (error) return json({ error: error.message }, 400)
+    return json(data)
+  }
+
+  if (parts[0] === 'sources' && parts[1]) {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    const patch = {}
+    for (const k of ['is_active', 'robots_allowed', 'terms_ok', 'trust_level', 'name', 'base_url', 'source_type']) if (k in body) patch[k] = body[k]
+    if ('config' in body) patch.config = body.config
+    patch.updated_at = new Date().toISOString()
+    const { data, error } = await admin.from('sources').update(patch).eq('id', parts[1]).select('*').single()
     if (error) return json({ error: error.message }, 400)
     return json(data)
   }

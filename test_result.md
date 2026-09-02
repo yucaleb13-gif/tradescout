@@ -217,6 +217,48 @@ backend:
         - working: true
           agent: "testing"
           comment: "Profile endpoints verified. GET /profile returns user profile. PUT /profile updates all fields correctly: full_name, company_name, region, trade_focus (array). Changes persist across subsequent GET requests."
+  - task: "Phase2 - Sources create/patch (admin service-role writes)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "POST /api/sources creates approved source (service role). PATCH /api/sources/:id toggles is_active/trust. Verified via curl."
+        - working: true
+          agent: "testing"
+          comment: "Comprehensive testing passed. POST /api/sources creates source with 201 status and returns id. Unique domain constraint enforced - duplicate domain returns 409 as expected. PATCH /api/sources/:id successfully updates is_active field. Auth gating verified - unauthenticated POST /api/sources returns 401."
+  - task: "Phase2 - Ingestion pipeline run (SOURCE->RETRIEVE->EXTRACT->NORMALIZE->EVIDENCE->VALIDATE->LEAD) with per-step logging"
+    implemented: true
+    working: true
+    file: "app/lib/pipeline/engine.js, app/lib/connectors/genericWeb.js, app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "POST /api/admin/run-pipeline {source_id}. Live-tested against real RSS (Google News construction query): 78 verified leads with evidence, all steps logged, trade detected deterministically. Re-run -> 0 found / 78 duplicated (dedup works). Retrieval failure -> no lead. No project_name evidence -> rejected. No AI used."
+        - working: true
+          agent: "testing"
+          comment: "CRITICAL pipeline testing passed. Happy path: POST /api/admin/run-pipeline with valid RSS source returns status='completed', found=78, verified=78, duplicated=0 on first run. Deduplication verified: re-run returns found=0, duplicated=78 (combination hash working). Failure path verified: non-existent domain returns status='failed', found=0, verified=0, retrieval_status='failed', NO leads created (critical requirement met). Inactive source: PATCH source to is_active=false then run-pipeline returns status='failed', found=0. Evidence integrity verified: GET /api/leads/:id returns evidence[] array with source_url, source_domain, extracted_value, extraction_method for each item. All non-null factual fields have corresponding evidence - NO fabricated data. Auth gating: unauthenticated POST /api/admin/run-pipeline returns 401."
+  - task: "Phase2 - Admin/debug endpoints (runs list + run detail with retrievals/logs/leads)"
+    implemented: true
+    working: true
+    file: "app/api/[[...path]]/route.js"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: "GET /api/admin/runs and GET /api/admin/runs/:id return run stats, retrievals, pipeline_logs, and leads produced. GET /api/connectors lists registered connectors."
+        - working: true
+          agent: "testing"
+          comment: "Admin endpoints fully tested. GET /api/admin/runs returns array with all required fields: status, connector, leads_found, leads_verified, leads_rejected, leads_duplicated, params.source_name. GET /api/admin/runs/:id returns complete run detail with retrievals[] (retrieval_status='success', http_status=200, byte_size=104214), logs[] (237 items with all expected steps: source, retrieve, extract, normalize, validate, lead), and leads[] (78 items with project_name, verification_status, source_url). GET /api/connectors returns array containing 'generic_web' connector. Auth gating: unauthenticated GET /api/admin/runs returns 401."
 
 frontend:
   - task: "Full SPA (auth screen, dashboard, discover, saved, history, sources, settings, lead detail) + Dashboard chart/onboarding + Saved Leads Kanban"
@@ -237,7 +279,7 @@ frontend:
 metadata:
   created_by: "main_agent"
   version: "1.0"
-  test_sequence: 1
+  test_sequence: 2
   run_ui: false
 
 test_plan:
@@ -250,6 +292,12 @@ agent_communication:
     - agent: "main"
       message: "Phase 1 backend ready. Supabase (project jxgzulgqnbfmwtyzlwtf, us-east-1) with 7 tables + RLS + signup trigger applied via psql. Auth uses cookie sessions; endpoints under /api. Please test all backend endpoints via the external URL. Auth notes: signup auto-confirms via admin so login works immediately; create fresh users with random emails. Focus: full auth lifecycle, RLS per-user isolation (create user A and B, ensure B cannot read/modify A's saved_leads/search_history and unauth requests get 401), saved-leads CRUD incl duplicate 409, search-history CRUD, profile update, leads filters + lead detail evidence. Demo data: 6 leads (is_demo) + 1 demo source exist; none are verification_status='verified'."
     - agent: "testing"
+      message: "Phase 2 backend testing complete - ALL 10 TESTS PASSED ✅. Comprehensive test suite executed covering: (1) AUTH GATING: Unauthenticated POST /api/admin/run-pipeline, GET /api/admin/runs, POST /api/sources all return 401 as expected. (2) CREATE SOURCE: POST /api/sources creates source with 201 status, duplicate domain returns 409 (unique constraint working). (3) RUN PIPELINE (happy path): Real RSS feed (Google News construction) returns status='completed', found=78, verified=78, duplicated=0 on first run. (4) DEDUPLICATION: Re-run returns status='completed', found=0, duplicated=78 (combination hash dedup working perfectly). (5) RUNS LIST: GET /api/admin/runs returns array with all required fields (status, connector, leads_found, leads_verified, leads_rejected, leads_duplicated, params.source_name). (6) RUN DETAIL: GET /api/admin/runs/:id returns retrievals[] (retrieval_status='success', http_status=200, byte_size=104214), logs[] (237 items with all expected steps: source, retrieve, extract, normalize, validate, lead), leads[] (78 items). (7) EVIDENCE INTEGRITY: GET /api/leads/:id returns evidence[] with source_url, source_domain, extracted_value, extraction_method. All non-null factual fields have corresponding evidence. NO fabricated data - fields without evidence are null. (8) FAILURE PATH: Non-existent domain returns status='failed', found=0, verified=0, retrieval_status='failed', NO leads created (critical requirement: retrieval fails -> no lead). (9) PATCH SOURCE: PATCH /api/sources/:id sets is_active=false, then run-pipeline returns status='failed', found=0 (inactive source validation working). (10) CONNECTORS: GET /api/connectors returns array containing 'generic_web' connector. External network egress confirmed working (real RSS feeds retrieved successfully). Pipeline creates verified evidence-backed leads from real sources, dedup prevents duplicates, retrieval failure and inactive source produce NO leads, and every step is logged. Phase 2 backend is production-ready."
+
+    - agent: "testing"
       message: "Backend testing complete - ALL 12 TESTS PASSED ✅. Comprehensive test suite executed covering: (1) Auth signup with profile trigger - working perfectly. (2) Auth login/logout/update-password/reset-request - all flows verified. (3) CRITICAL RLS isolation - User A and User B tested, complete isolation confirmed (read/write/delete). (4) Stats endpoint - all numeric fields correct, per-user counts working. (5) Leads list with all filters (trade, project_type, location, q, min_value) - 6 demo leads returned. (6) Lead detail with evidence array, source object, saved field - all present. (7) Saved leads CRUD - create (201), duplicate (409), list, update status/notes, delete all working. (8) Search history CRUD - create, list, delete all working. (9) Profile get/update with all fields - working and persisting. (10) Unauthenticated access - all protected endpoints return 401. Cookie-based sessions working correctly across all requests. No issues found. Backend is production-ready."
     - agent: "testing"
       message: "Frontend testing complete - ALL 10 FLOWS PASSED ✅. Tested complete user journey: (1) AUTH: Signup creates account with auto-confirm, logs in immediately, redirects to dashboard with sidebar navigation visible. (2) DASHBOARD: All 4 stat cards showing correct numbers (6/0/2/6), DEMO banner present, onboarding checklist with progress bar (0/3 complete), bar chart rendering 6 trade categories, recent leads list with DEMO badges. (3) DISCOVER: Filter controls present, 'Find Opportunities' saves search with toast, alert shows live discovery not connected, table/card view toggle working, lead detail opens. (4) LEAD DETAIL: All sections present, 'Not available' shown for empty fields (not fabricated), opportunity value shows separate source-stated and estimated trade value with estimate badge, lead score present, save/status change working. (5) SAVED LEADS: List view with status badges, note dialog working, Board view with all 6 Kanban columns (New/Interested/Contacted/Quoting/Won/Lost), status changes move cards between columns, remove working. (6) SEARCH HISTORY: Search from step 3 listed with filter badges and timestamp, delete working. (7) SOURCES: DEMO source table showing demo.tradescout.local with DEMO badge, Inactive status, reliability bar, Last checked: Never, info alert present. (8) SETTINGS: Profile update working, trade focus checkboxes present, save successful with toast. (9) LOGOUT: Avatar menu opens, sign out returns to auth screen. (10) RESPONSIVE: Mobile viewport (390x844) tested, hamburger menu opens sidebar sheet, navigation working. No console errors. Phase 1 frontend is production-ready."
+    - agent: "main"
+      message: "Phase 2 ingestion + verification engine ready. New: modular connector system (app/lib/connectors: registry + generic_web RSS/Atom/HTML), deterministic NO-AI extraction with per-field evidence, pipeline engine (app/lib/pipeline/engine.js) logging every step to pipeline_logs, retrievals table for raw source logging, dedup via combination hash (source id + url + project_name + location), and validation state machine (verified only if source active/retrievable/content non-empty/project_name evidence present + trust>=50). New endpoints: POST /api/sources, PATCH /api/sources/:id, POST /api/admin/run-pipeline {source_id}, GET /api/admin/runs, GET /api/admin/runs/:id, GET /api/connectors. Please test: (a) create a source via POST /api/sources (use an RSS feed url, e.g. base_url a public Google News RSS like https://news.google.com/rss/search?q=construction%20roofing&hl=en-US&gl=US&ceid=US:en, source_type rss_feed, is_active true, terms_ok true, robots_allowed true, trust_level 60); (b) POST /api/admin/run-pipeline with that source_id -> expect status completed with found>0 and verified>0; (c) re-run -> expect found 0 and duplicated>0 (dedup); (d) GET /api/admin/runs shows the run with counts; (e) GET /api/admin/runs/:id returns retrievals[] (retrieval_status success, http_status 200, byte_size>0), logs[] with steps source/retrieve/extract/normalize/validate/lead, and leads[]; (f) a lead detail (GET /api/leads/:id) for a produced lead has evidence[] entries with source_url/source_domain and extracted_value; (g) failure path: create a source with a bad base_url (e.g. https://news.google.com/this-404-path) is_active true and run -> expect status failed, 0 leads, and a retrieve fail log. Auth required (cookie session); create a fresh random user. NOTE: external network egress is available from the server."
+
