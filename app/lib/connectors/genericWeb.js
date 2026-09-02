@@ -171,6 +171,40 @@ export const genericWebConnector = {
     return { fields, evidence, source_url: url }
   },
 
+  // DETAIL FETCH (optional, per source config.fetch_details): retrieve the item's own page and
+  // extract ONLY fields not already evidenced from the feed. Every value maps to a snippet on that page.
+  async retrieveDetail(url) {
+    const res = await fetchUrl(url, { timeout: 8000 })
+    const content = res.content || ''
+    const isHtml = /<html|<body|<head/i.test(content.slice(0, 5000))
+    const status = !res.ok ? 'failed' : (!content.trim() ? 'empty' : (!isHtml ? 'unsupported' : 'success'))
+    return {
+      source_url: url, source_domain: domainOf(url), http_status: res.http_status, retrieval_status: status,
+      error: res.error || (status === 'unsupported' ? 'Not an HTML document' : null),
+      content_hash: sha256(content), raw_content: content.slice(0, 200000), byte_size: content.length, _content: content,
+    }
+  },
+  extractDetail(extracted, detailRetrieval) {
+    const html = detailRetrieval._content || ''
+    const text = stripHtml(html).slice(0, 60000)
+    const url = detailRetrieval.source_url
+    const have = new Set(extracted.evidence.map((e) => e.field))
+    const fields = {}; const evidence = []
+    const add = (field, value, snippet) => {
+      if (have.has(field) || value === null || value === undefined || String(value).trim() === '') return
+      fields[field] = value
+      evidence.push({ field, value: String(value), snippet: clean(snippet || String(value)).slice(0, 1000), source_url: url, method: 'regex' })
+    }
+    const md = metaDesc(html); if (md) add('project_description', md.slice(0, 2000), md.slice(0, 300))
+    const tr = detectTrade(text); if (tr) add('trade_category', tr.trade, tr.snippet)
+    const loc = matchLocation(text); if (loc) add('location', loc.value, loc.snippet)
+    const money = matchMoney(text); if (money) add('project_value', money.raw, money.snippet)
+    const dl = matchDeadline(text); if (dl) add('bid_deadline', dl.iso, dl.snippet)
+    const email = matchEmail(text); if (email) add('contact_email', email, email)
+    const phone = matchPhone(text); if (phone) add('contact_phone', phone, phone)
+    return { fields, evidence }
+  },
+
   // NORMALIZE: shape into lead columns (no invented data)
   normalize(extracted) {
     const f = extracted.fields

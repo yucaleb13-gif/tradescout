@@ -3,9 +3,14 @@ import { createClient } from '@/app/lib/supabase/server'
 import { admin } from '@/app/lib/supabase/admin'
 import { runPipeline } from '@/app/lib/pipeline/engine'
 import { listConnectors } from '@/app/lib/connectors/registry'
+import { runDueSources, listDueSources, ensureScheduler } from '@/app/lib/pipeline/scheduler'
+import { purgeSource, purgeRun } from '@/app/lib/pipeline/purge'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
+
+// In-process ticker for scheduled runs (long-lived server). External schedulers can call GET /api/cron/run-due.
+ensureScheduler()
 
 const json = (data, status = 200) => NextResponse.json(data, { status })
 
@@ -136,10 +141,30 @@ export async function POST(request, context) {
     if (!userId) return json({ error: 'Unauthorized' }, 401)
     if (!body.source_id) return json({ error: 'source_id is required' }, 400)
     try {
-      const result = await runPipeline({ sourceId: body.source_id, userId })
+      const result = await runPipeline({ sourceId: body.source_id, userId, trigger: 'manual' })
       return json(result)
     } catch (e) {
       return json({ error: e.message }, 400)
+    }
+  }
+
+  // -------- SCHEDULED RUNS: run every source that is due now (config.schedule_minutes)
+  if (path === 'admin/run-due') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    try { return json(await runDueSources({ trigger: 'manual_due' })) } catch (e) { return json({ error: e.message }, 400) }
+  }
+
+  // -------- PURGE ingested/test data for a source or a run
+  if (path === 'admin/purge') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    try {
+      if (body.run_id) return json(await purgeRun(body.run_id))
+      if (body.source_id) return json(await purgeSource(body.source_id, { deleteSource: body.delete_source === true }))
+      return json({ error: 'source_id or run_id is required' }, 400)
+    } catch (e) {
+      return json({ error: e.message }, /not found/i.test(e.message) ? 404 : 400)
     }
   }
 
@@ -257,6 +282,23 @@ export async function GET(request, context) {
     return json(listConnectors())
   }
 
+  // -------- CRON entrypoint for external schedulers (no cookie; shared secret)
+  if (path === 'cron/run-due') {
+    const secret = process.env.CRON_SECRET
+    const provided = request.headers.get('x-cron-secret') || searchParams.get('secret')
+    if (!secret) return json({ error: 'CRON_SECRET is not configured' }, 503)
+    if (provided !== secret) return json({ error: 'Forbidden' }, 403)
+    try { return json(await runDueSources({ trigger: 'cron' })) } catch (e) { return json({ error: e.message }, 400) }
+  }
+
+  // -------- ADMIN: which sources are due for a scheduled run
+  if (path === 'admin/due') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    const due = await listDueSources()
+    return json(due.map((s) => ({ id: s.id, name: s.name, schedule_minutes: s.config?.schedule_minutes || 0, last_crawled_at: s.last_crawled_at })))
+  }
+
   // -------- ADMIN / DEBUG: pipeline runs
   if (path === 'admin/runs') {
     const userId = await getUserId(supabase)
@@ -333,7 +375,11 @@ export async function PATCH(request, context) {
     if (!userId) return json({ error: 'Unauthorized' }, 401)
     const patch = {}
     for (const k of ['is_active', 'robots_allowed', 'terms_ok', 'trust_level', 'name', 'base_url', 'source_type']) if (k in body) patch[k] = body[k]
-    if ('config' in body) patch.config = body.config
+    if ('config' in body && body.config && typeof body.config === 'object') {
+      // merge into existing config so partial updates (e.g. schedule_minutes only) don't wipe other keys
+      const { data: cur } = await admin.from('sources').select('config').eq('id', parts[1]).single()
+      patch.config = { ...(cur?.config || {}), ...body.config }
+    }
     patch.updated_at = new Date().toISOString()
     const { data, error } = await admin.from('sources').update(patch).eq('id', parts[1]).select('*').single()
     if (error) return json({ error: error.message }, 400)
@@ -362,6 +408,14 @@ export async function DELETE(request, context) {
     const { error } = await supabase.from('search_history').delete().eq('id', parts[1]).eq('profile_id', userId)
     if (error) return json({ error: error.message }, 400)
     return json({ ok: true })
+  }
+
+  // DELETE /api/sources/:id -> purge all ingested data, then remove the source (demo sources refused)
+  if (parts[0] === 'sources' && parts[1]) {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    try { return json(await purgeSource(parts[1], { deleteSource: true })) }
+    catch (e) { return json({ error: e.message }, /not found/i.test(e.message) ? 404 : 400) }
   }
 
   return json({ error: 'Not found' }, 404)

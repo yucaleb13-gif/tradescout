@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Terminal, ArrowLeft, CheckCircle2, XCircle, SkipForward, RefreshCw } from 'lucide-react'
+import { Terminal, ArrowLeft, CheckCircle2, XCircle, SkipForward, RefreshCw, Eraser, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 
 const RUN_STATUS = {
@@ -20,10 +20,11 @@ const RUN_STATUS = {
 const STEP_ICON = { ok: CheckCircle2, fail: XCircle, skip: SkipForward }
 const STEP_COLOR = { ok: 'text-emerald-600', fail: 'text-rose-600', skip: 'text-amber-600' }
 
-export default function AdminView() {
+export default function AdminView({ onChanged }) {
   const [runs, setRuns] = useState(null)
   const [detail, setDetail] = useState(null)
   const [loadingDetail, setLoadingDetail] = useState(false)
+  const [purging, setPurging] = useState(false)
 
   const load = async () => { try { setRuns(await api('admin/runs')) } catch (e) { toast.error(e.message); setRuns([]) } }
   useEffect(() => { load() }, [])
@@ -31,6 +32,17 @@ export default function AdminView() {
   const openRun = async (id) => {
     setLoadingDetail(true)
     try { setDetail(await api(`admin/runs/${id}`)) } catch (e) { toast.error(e.message) } finally { setLoadingDetail(false) }
+  }
+
+  const purgeRun = async () => {
+    if (!detail) return
+    if (!window.confirm(`Purge this run? ${detail.leads_found ?? 0} lead(s) and all its retrievals/logs will be permanently removed.`)) return
+    setPurging(true)
+    try {
+      const r = await api('admin/purge', { method: 'POST', body: { run_id: detail.id } })
+      toast.success(`Run purged: ${r.leads} lead(s), ${r.retrievals} retrieval(s), ${r.logs} log(s) removed`)
+      setDetail(null); load(); onChanged && onChanged()
+    } catch (e) { toast.error(e.message) } finally { setPurging(false) }
   }
 
   const fmt = (d) => d ? new Date(d).toLocaleString() : '—'
@@ -46,22 +58,31 @@ export default function AdminView() {
               <h1 className="text-xl font-semibold">Run {d.id.slice(0, 8)}</h1>
               <Badge variant="outline" className={RUN_STATUS[d.status]}>{d.status}</Badge>
               <span className="text-sm text-muted-foreground">{d.connector} · {d.params?.source_name || '—'}</span>
+              {d.params?.trigger && <Badge variant="outline" className="text-[10px] uppercase">{d.params.trigger}</Badge>}
+              {d.summary?.error && <span className="text-xs text-rose-600">error: {d.summary.error}</span>}
+              <div className="ml-auto">
+                <Button size="sm" variant="outline" className="text-rose-600 border-rose-200 hover:bg-rose-50" disabled={purging} onClick={purgeRun} data-testid="purge-run-btn">
+                  {purging ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Eraser className="h-4 w-4 mr-1" />}Purge this run
+                </Button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {[['Produced', d.leads_found, 'text-slate-900'], ['Verified', d.leads_verified, 'text-emerald-600'], ['Rejected', d.leads_rejected, 'text-rose-600'], ['Duplicated', d.leads_duplicated, 'text-amber-600']].map(([l, v, c]) => (
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-3">
+              {[['Produced', d.leads_found, 'text-slate-900'], ['Verified', d.leads_verified, 'text-emerald-600'], ['Rejected', d.leads_rejected, 'text-rose-600'], ['Duplicated', d.leads_duplicated, 'text-amber-600'],
+                ['Detail pages', d.summary?.details_fetched, 'text-slate-700'], ['Detail failed', d.summary?.details_failed, 'text-slate-500']].map(([l, v, c]) => (
                 <Card key={l}><CardContent className="pt-5"><p className="text-xs text-muted-foreground">{l}</p><p className={`text-2xl font-semibold ${c}`}>{v ?? 0}</p></CardContent></Card>
               ))}
             </div>
 
             <Card>
-              <CardHeader><CardTitle className="text-base">Retrieval</CardTitle></CardHeader>
-              <CardContent className="space-y-2">
+              <CardHeader><CardTitle className="text-base">Retrievals ({d.retrievals.length})</CardTitle></CardHeader>
+              <CardContent className="space-y-2 max-h-[360px] overflow-y-auto">
                 {d.retrievals.length === 0 && <p className="text-sm text-muted-foreground">No retrieval recorded.</p>}
                 {d.retrievals.map((r) => (
                   <div key={r.id} className="rounded-lg border p-3 text-sm">
-                    <div className="flex items-center justify-between"><span className="font-medium break-all">{r.source_title || r.source_url}</span>
-                      <Badge variant="outline" className={r.retrieval_status === 'success' ? RUN_STATUS.completed : RUN_STATUS.failed}>{r.retrieval_status}</Badge></div>
+                    <div className="flex items-center justify-between gap-2"><span className="font-medium break-all">{r.source_title || r.source_url}</span>
+                      <Badge variant="outline" className={r.retrieval_status === 'success' ? RUN_STATUS.completed : (r.retrieval_status === 'blocked' ? 'bg-rose-100 text-rose-700 border-rose-200' : RUN_STATUS.failed)}>{r.retrieval_status}</Badge></div>
+                    {r.source_title && <p className="text-[11px] text-muted-foreground break-all">{r.source_url}</p>}
                     <p className="text-xs text-muted-foreground mt-1">HTTP {r.http_status ?? '—'} · {r.byte_size ?? 0} bytes · {r.source_domain}</p>
                     {r.error && <p className="text-xs text-rose-600 mt-1">{r.error}</p>}
                     <p className="text-[10px] text-muted-foreground mt-1 font-mono break-all">hash: {r.content_hash?.slice(0, 24)}…</p>
