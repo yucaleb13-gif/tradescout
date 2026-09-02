@@ -2,8 +2,8 @@ import './globals.css'
 import { Providers } from './providers'
 
 export const metadata = {
-  title: 'Next.js MongoDB Template',
-  description: 'A simple template with App Router, MongoDB, and shadcn/ui',
+  title: 'TradeScout — Verified Construction Opportunity Discovery',
+  description: 'Verified construction opportunity discovery for trade contractors. Every lead traceable to a real public source.',
 }
 
 export default function RootLayout({ children }) {
