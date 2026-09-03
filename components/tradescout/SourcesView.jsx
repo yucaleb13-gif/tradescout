@@ -16,7 +16,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, Dialog
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Alert, AlertDescription } from '@/components/ui/alert'
-import { Database, Info, Plus, Play, Loader2, MoreHorizontal, Trash2, Eraser, FileSearch, ShieldCheck, ShieldX, ShieldQuestion, Clock, Timer } from 'lucide-react'
+import { Database, Info, Plus, Play, Loader2, MoreHorizontal, Trash2, Eraser, FileSearch, ShieldCheck, ShieldX, ShieldQuestion, Clock, Timer, ScrollText } from 'lucide-react'
 import { toast } from 'sonner'
 
 const TYPES = [
@@ -27,9 +27,11 @@ const TYPE_LABEL = Object.fromEntries(TYPES)
 const SCHEDULES = [['0', 'Manual'], ['60', 'Every hour'], ['360', 'Every 6 hours'], ['720', 'Every 12 hours'], ['1440', 'Daily'], ['10080', 'Weekly']]
 const SCHEDULE_LABEL = Object.fromEntries(SCHEDULES)
 
-const EMPTY_FORM = { name: '', domain: '', base_url: '', source_type: 'rss_feed', trust_level: 60, is_active: true, terms_ok: true, fetch_details: false, schedule_minutes: '0' }
+const CONNECTORS = [['generic_web', 'Generic Web / RSS'], ['csv_dataset', 'CSV dataset (open data download)']]
+const EMPTY_FORM = { name: '', domain: '', base_url: '', source_type: 'rss_feed', connector: 'generic_web', trust_level: 60, is_active: true, terms_ok: true, fetch_details: false, schedule_minutes: '0', access_basis: '', license_url: '', dataset: 'canadabuys_tender_notices' }
 
-function RobotsBadge({ value }) {
+function RobotsBadge({ value, licensed }) {
+  if (value === false && licensed) return <Badge variant="outline" className="gap-1 border-sky-200 bg-sky-50 text-sky-700" title="robots.txt disallows generic crawling; retrieval proceeds under the approved licence recorded on this source"><ScrollText className="h-3 w-3" />licence</Badge>
   if (value === true) return <Badge variant="outline" className="gap-1 border-emerald-200 bg-emerald-50 text-emerald-700" title="robots.txt checked on last run: allowed"><ShieldCheck className="h-3 w-3" />allowed</Badge>
   if (value === false) return <Badge variant="outline" className="gap-1 border-rose-200 bg-rose-50 text-rose-700" title="robots.txt disallows this URL — runs are blocked"><ShieldX className="h-3 w-3" />blocked</Badge>
   return <Badge variant="outline" className="gap-1 text-slate-500" title="Checked automatically on the next run"><ShieldQuestion className="h-3 w-3" />unchecked</Badge>
@@ -52,8 +54,11 @@ export default function SourcesView({ onRan }) {
     if (!form.name || !form.domain || !form.base_url) { toast.error('Name, domain and source URL are required'); return }
     setSaving(true)
     try {
-      const { fetch_details, schedule_minutes, ...rest } = form
-      await api('sources', { method: 'POST', body: { ...rest, trust_level: Number(form.trust_level), config: { fetch_details, schedule_minutes: Number(schedule_minutes) || 0, max_detail_fetch: 10 } } })
+      const { fetch_details, schedule_minutes, access_basis, license_url, dataset, ...rest } = form
+      const config = { fetch_details, schedule_minutes: Number(schedule_minutes) || 0, max_detail_fetch: 10 }
+      if (form.connector === 'csv_dataset') { config.dataset = dataset; config.dataset_url = form.base_url }
+      if (access_basis.trim()) { config.access_basis = access_basis.trim(); config.license_url = license_url.trim() || null; config.access_approved = true; config.access_approved_at = new Date().toISOString(); config.access_note = 'Approved by the user when adding the source' }
+      await api('sources', { method: 'POST', body: { ...rest, trust_level: Number(form.trust_level), config } })
       toast.success('Source added — robots.txt will be checked on the first run'); setOpen(false); setForm(EMPTY_FORM); load()
     } catch (e) { toast.error(e.message) } finally { setSaving(false) }
   }
@@ -137,6 +142,20 @@ export default function SourcesView({ onRan }) {
                   </div>
                   <div className="space-y-1"><Label>Reliability (0–100)</Label><Input type="number" min="0" max="100" value={form.trust_level} onChange={(e) => setForm({ ...form, trust_level: e.target.value })} /></div>
                 </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1"><Label>Connector</Label>
+                    <Select value={form.connector} onValueChange={(v) => setForm({ ...form, connector: v, source_type: v === 'csv_dataset' ? 'government_tender' : form.source_type })}>
+                      <SelectTrigger data-testid="source-connector"><SelectValue /></SelectTrigger>
+                      <SelectContent>{CONNECTORS.map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}</SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1"><Label>Licensed access basis <span className="text-muted-foreground">(optional)</span></Label>
+                    <Input data-testid="source-access-basis" value={form.access_basis} onChange={(e) => setForm({ ...form, access_basis: e.target.value })} placeholder="e.g. Open Government Licence – Canada" /></div>
+                </div>
+                {form.access_basis.trim() && (
+                  <div className="space-y-1"><Label>Licence URL</Label><Input data-testid="source-license-url" value={form.license_url} onChange={(e) => setForm({ ...form, license_url: e.target.value })} placeholder="https://open.canada.ca/en/open-government-licence-canada" />
+                    <p className="text-xs text-amber-700">By setting an access basis you confirm this file is published for reuse under that licence. The robots.txt result is still recorded on every run; only an approved licence lets retrieval proceed when robots.txt disallows generic crawling.</p></div>
+                )}
                 <div className="space-y-1"><Label>Scheduled runs</Label>
                   <Select value={form.schedule_minutes} onValueChange={(v) => setForm({ ...form, schedule_minutes: v })}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -181,12 +200,14 @@ export default function SourcesView({ onRan }) {
                     <div className="flex items-center gap-2 flex-wrap">{s.name}
                       {s.is_demo && <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-700">DEMO</Badge>}
                       {s.config?.fetch_details === true && <Badge variant="outline" className="text-[10px] gap-1 text-slate-600"><FileSearch className="h-3 w-3" />detail fetch</Badge>}
+                      {s.connector === 'csv_dataset' && <Badge variant="outline" className="text-[10px] text-slate-600">dataset</Badge>}
+                      {s.config?.access_basis && <Badge variant="outline" className="text-[10px] gap-1 border-sky-200 bg-sky-50 text-sky-700" title={`Licensed access: ${s.config.access_basis}${s.config.license_url ? ' · ' + s.config.license_url : ''}`}><ScrollText className="h-3 w-3" />licensed</Badge>}
                     </div>
                   </TableCell>
                   <TableCell className="text-muted-foreground">{s.domain}</TableCell>
                   <TableCell>{TYPE_LABEL[s.source_type] || s.source_type}</TableCell>
                   <TableCell><Switch checked={!!s.is_active} onCheckedChange={(v) => toggleActive(s, v)} disabled={s.is_demo} /></TableCell>
-                  <TableCell><RobotsBadge value={s.is_demo ? null : s.robots_allowed} /></TableCell>
+                  <TableCell><RobotsBadge value={s.is_demo ? null : s.robots_allowed} licensed={s.config?.access_approved === true} /></TableCell>
                   <TableCell><div className="flex items-center gap-2"><Progress value={s.trust_level} className="h-2" /><span className="text-xs text-muted-foreground w-8">{s.trust_level}</span></div></TableCell>
                   <TableCell>
                     {s.is_demo ? <span className="text-xs text-slate-400">—</span> : (

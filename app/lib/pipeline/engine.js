@@ -2,14 +2,17 @@ import { admin } from '@/app/lib/supabase/admin'
 import { getConnector } from '@/app/lib/connectors/registry'
 import { sha256, domainOf } from '@/app/lib/connectors/genericWeb'
 import { checkRobots, respectCrawlDelay } from '@/app/lib/pipeline/robots'
+import { normalizeQuery, describeQuery, tradeMatch, locationMatch, textMatch, dateInRange } from '@/app/lib/connectors/query'
 
 const htmlTitleOf = (c) => { const m = String(c || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i); return m ? m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300) : null }
 
 // map extractor field -> lead_evidence.evidence_field enum
 const EVIDENCE_FIELD = {
   project_name: 'project_name', project_description: 'project_description', trade_category: 'trade_category',
-  location: 'location', contact_email: 'contact_email', contact_phone: 'contact_phone',
-  project_value: 'project_value', bid_deadline: 'timeline',
+  location: 'location', address: 'address', company_name: 'company_name', contact_name: 'contact_name',
+  contact_email: 'contact_email', contact_phone: 'contact_phone', project_value: 'project_value',
+  tender_status: 'tender_status', bid_deadline: 'timeline', timeline_text: 'timeline', timeline_start: 'timeline', timeline_end: 'timeline',
+  project_type: 'project_description', // no dedicated enum value; category is part of the described scope
 }
 
 async function log(runId, step, status, message, meta = {}, ids = {}) {
@@ -28,7 +31,8 @@ function dedupHash(source, url, fields) {
 function runValidation({ source, retrieval, extracted, normalized }) {
   const hasName = extracted.evidence.some((e) => e.field === 'project_name')
   const checks = {
-    source_url_exists: !!(source.base_url || source.config?.feed_url),
+    source_url_exists: !!(source.base_url || source.config?.feed_url || source.config?.dataset_url),
+    lead_url_valid: /^https?:\/\//i.test(extracted.source_url || ''),
     source_retrievable: retrieval.retrieval_status === 'success',
     content_non_empty: (retrieval.byte_size || 0) > 0,
     required_evidence: hasName,
@@ -38,13 +42,13 @@ function runValidation({ source, retrieval, extracted, normalized }) {
   }
   const reasons = Object.entries(checks).filter(([, v]) => !v).map(([k]) => k)
   let status
-  if (!checks.source_retrievable || !checks.content_non_empty || !checks.required_evidence) status = 'rejected'
-  else if (reasons.length > 0 || (source.trust_level || 0) < 50) status = 'needs_review'
+  if (!checks.source_retrievable || !checks.content_non_empty || !checks.required_evidence || !checks.lead_url_valid) status = 'rejected'
+  else if (reasons.length > 0 || (source.trust_level || 0) < 50) status = 'unverified'
   else status = 'verified'
   return { status, checks, reasons }
 }
 
-export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
+export async function runPipeline({ sourceId, userId, trigger = 'manual', query = null }) {
   // load source
   const { data: source, error: sErr } = await admin.from('sources').select('*').eq('id', sourceId).single()
   if (sErr || !source) throw new Error('Source not found')
@@ -54,17 +58,19 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
   const lastFetchAt = new Map() // per-origin politeness (Crawl-delay)
   const startedAt = Date.now()
   const DETAIL_TIME_BUDGET_MS = 40000 // stay well under the route's 60s maxDuration
+  const q = query ? normalizeQuery(query) : null // null => full ingestion (no filter, no cap)
+  const leadIds = []; const duplicateLeadIds = []
 
   // create run
   const { data: run } = await admin.from('search_runs').insert({
     initiated_by: userId || null, connector: connector.key, status: 'running',
     started_at: new Date().toISOString(), region: null, source_ids: [source.id],
-    params: { source_id: source.id, source_name: source.name, trigger },
+    params: { source_id: source.id, source_name: source.name, trigger, query: q },
   }).select('*').single()
 
   const runId = run.id
   const counters = { found: 0, verified: 0, rejected: 0, duplicated: 0, details_fetched: 0, details_failed: 0 }
-  await log(runId, 'source', 'ok', `Source: ${source.name} (${source.domain}) · trigger: ${trigger}`, { connector: connector.key, trigger })
+  await log(runId, 'source', 'ok', `Source: ${source.name} (${source.domain}) · trigger: ${trigger}${q ? ' · search: ' + describeQuery(q) : ' · full ingestion'}`, { connector: connector.key, trigger, query: q })
 
   try {
     // ---- SOURCE checks
@@ -73,9 +79,9 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
       await finishRun(runId, 'failed', counters, { error: 'source_inactive' })
       return summary(run, counters, 'failed')
     }
-    const targetUrl = source?.config?.feed_url || source?.base_url
+    const targetUrl = source?.config?.dataset_url || source?.config?.feed_url || source?.base_url
     if (!targetUrl) {
-      await log(runId, 'source', 'fail', 'Source has no base_url/feed_url')
+      await log(runId, 'source', 'fail', 'Source has no base_url/feed_url/dataset_url')
       await finishRun(runId, 'failed', counters, { error: 'no_url' })
       return summary(run, counters, 'failed')
     }
@@ -83,7 +89,14 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
     // ---- ROBOTS guard (deterministic; blocked => no retrieval, no leads)
     const robots = await checkRobots(targetUrl, robotsCache)
     await admin.from('sources').update({ robots_allowed: robots.allowed, updated_at: new Date().toISOString() }).eq('id', source.id)
-    if (!robots.allowed) {
+    const licence = source.config?.access_basis ? {
+      basis: source.config.access_basis, license_url: source.config.license_url || null,
+      approved: source.config.access_approved === true, approved_at: source.config.access_approved_at || null, note: source.config.access_note || null,
+    } : null
+    if (!robots.allowed && licence?.approved) {
+      // Explicit, human-approved licensed access (e.g. Open Government Licence dataset file). Recorded, never silent.
+      await log(runId, 'robots', 'ok', `robots.txt disallows generic crawling (${robots.matched_rule || 'disallowed'}) — proceeding under approved licensed access basis: ${licence.basis}${licence.license_url ? ' (' + licence.license_url + ')' : ''}`, { ...robots, licence })
+    } else if (!robots.allowed) {
       await admin.from('retrievals').insert({
         run_id: runId, source_id: source.id, source_url: targetUrl, source_domain: domainOf(targetUrl),
         http_status: null, retrieval_status: 'blocked', byte_size: 0, error: `Blocked by robots.txt (${robots.matched_rule || 'rule'})`,
@@ -93,7 +106,7 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
       await finishRun(runId, 'failed', counters, { error: 'robots_disallowed', robots })
       return summary(run, counters, 'failed')
     }
-    await log(runId, 'robots', 'ok', robots.status === 'fetched'
+    if (robots.allowed) await log(runId, 'robots', 'ok', robots.status === 'fetched'
       ? `robots.txt allows ${new URL(targetUrl).pathname}${robots.matched_rule ? ' (' + robots.matched_rule + ')' : ''}`
       : `No robots.txt restrictions found (${robots.status})`, robots)
 
@@ -117,14 +130,31 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
     await log(runId, 'retrieve', 'ok', `Retrieved ${r.byte_size} bytes (HTTP ${r.http_status})`, { content_hash: r.content_hash }, { retrieval_id: retrievalId })
 
     // ---- SEARCH (candidate items)
-    const { kind, source_title, items } = connector.search(r)
+    const searched = connector.search(r, q || {}, source)
+    const { kind, source_title, stats } = searched
+    let items = searched.items || []
     // update retrieval title
     if (source_title) await admin.from('retrievals').update({ source_title }).eq('id', retrievalId)
     r.source_title = source_title
-    await log(runId, 'extract', 'ok', `Parsed ${items.length} candidate item(s) [${kind}]`, { kind, count: items.length }, { retrieval_id: retrievalId })
+    await log(runId, 'extract', 'ok', `Parsed ${stats?.rows ?? items.length} candidate item(s) [${kind}]`, { kind, count: stats?.rows ?? items.length }, { retrieval_id: retrievalId })
+    if (q) {
+      if (!stats) {
+        // connector did not filter itself -> apply deterministic filters on item title/description/date
+        const before = items.length
+        items = items.filter((it) => {
+          const text = `${it.title || ''} ${it.description || ''} ${(it.categories || []).join(' ')}`
+          return tradeMatch(text, q.trade).ok && locationMatch(q.location, text).ok && textMatch(q.project_type, text) && dateInRange(it.pubDate, q.date_from, q.date_to)
+        })
+        await log(runId, 'search', 'ok', `Filtered ${before} → ${items.length} item(s) by ${describeQuery(q)}`, { before, after: items.length, query: q }, { retrieval_id: retrievalId })
+      } else {
+        await log(runId, 'search', 'ok', `Matched ${stats.matched} of ${stats.rows} row(s) by ${describeQuery(q)}${stats.truncated ? ` · ${stats.truncated} more not returned (limit)` : ''}`, { ...stats, query: q }, { retrieval_id: retrievalId })
+      }
+      if (items.length > q.limit) items = items.slice(0, q.limit)
+      if (items.length === 0) await log(runId, 'search', 'skip', 'Zero legitimate matches — returning zero (nothing fabricated)', {}, { retrieval_id: retrievalId })
+    }
 
-    // detail fetch settings (opt-in per source)
-    const detailEnabled = source.config?.fetch_details === true
+    // detail fetch settings (opt-in per source; skipped for interactive searches to keep them responsive)
+    const detailEnabled = source.config?.fetch_details === true && trigger !== 'search'
     let detailBudget = detailEnabled ? Math.max(0, Math.min(25, Number(source.config?.max_detail_fetch ?? 10))) : 0
     if (detailEnabled) await log(runId, 'detail', 'ok', `Detail fetch enabled (max ${detailBudget} item page(s) this run)`, { max: detailBudget }, { retrieval_id: retrievalId })
 
@@ -143,6 +173,8 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
       const { data: dup } = await admin.from('leads').select('id').eq('dedup_hash', dh).maybeSingle()
       if (dup) {
         counters.duplicated++
+        duplicateLeadIds.push(dup.id)
+        await admin.from('leads').update({ last_seen_at: new Date().toISOString() }).eq('id', dup.id)
         await log(runId, 'dedup', 'skip', `Duplicate of lead ${dup.id}`, { dedup_hash: dh }, { retrieval_id: retrievalId, lead_id: dup.id })
         continue
       }
@@ -210,12 +242,13 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual' }) {
       if (evidenceRows.length) await admin.from('lead_evidence').insert(evidenceRows)
 
       counters.found++
+      leadIds.push(lead.id)
       if (validation.status === 'verified') counters.verified++
       await log(runId, 'lead', 'ok', `Created lead (${validation.status}): ${normalized.project_name}`, { evidence_count: evidenceRows.length }, { retrieval_id: retrievalId, lead_id: lead.id })
     }
 
-    await finishRun(runId, 'completed', counters, { kind })
-    return summary(run, counters, 'completed')
+    await finishRun(runId, 'completed', counters, { kind, search: stats || null, lead_ids: leadIds, duplicate_lead_ids: duplicateLeadIds })
+    return { ...summary(run, counters, 'completed'), lead_ids: leadIds, duplicate_lead_ids: duplicateLeadIds, search: stats || null }
   } catch (e) {
     await log(runId, 'lead', 'fail', `Pipeline error: ${e.message}`)
     await finishRun(runId, 'failed', counters, { error: e.message })

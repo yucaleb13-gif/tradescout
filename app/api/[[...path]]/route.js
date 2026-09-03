@@ -135,6 +135,51 @@ export async function POST(request, context) {
     return json(data, 201)
   }
 
+  // -------- LIVE DISCOVERY: run a user search against approved sources (max 20 opportunities per source)
+  if (path === 'discover/search') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    const query = {
+      trade: body.trade || null, location: body.location || null, project_type: body.project_type || null,
+      date_from: body.date_from || null, date_to: body.date_to || null, limit: Math.min(20, Number(body.limit) || 20),
+    }
+    let srcQ = admin.from('sources').select('id, name, domain, connector, is_active, is_demo, robots_allowed, trust_level, config')
+      .eq('is_active', true).eq('is_demo', false).order('trust_level', { ascending: false })
+    if (body.source_id) srcQ = srcQ.eq('id', body.source_id)
+    const { data: allSources } = await srcQ
+    // skip sources already known to be robots-blocked without an approved licence (they cannot yield leads)
+    const sources = (allSources || []).filter((s) => body.source_id || s.robots_allowed !== false || s.config?.access_approved === true)
+    if (!sources?.length) return json({ error: 'No active approved sources to search', runs: [], leads: [] }, 400)
+
+    const runs = []
+    for (const s of sources.slice(0, 4)) {
+      try {
+        const r = await runPipeline({ sourceId: s.id, userId, trigger: 'search', query })
+        runs.push({ source_id: s.id, source_name: s.name, source_domain: s.domain, connector: s.connector, ...r })
+      } catch (e) {
+        runs.push({ source_id: s.id, source_name: s.name, source_domain: s.domain, connector: s.connector, status: 'failed', error: e.message, found: 0, verified: 0, rejected: 0, duplicated: 0 })
+      }
+    }
+    // every opportunity that matched this search: newly created + previously known (duplicates), capped per source
+    const ids = [...new Set(runs.flatMap((r) => [...(r.lead_ids || []), ...(r.duplicate_lead_ids || [])]))]
+    let leads = []
+    if (ids.length) {
+      const { data: rows } = await admin.from('leads').select('*, source:sources(id, name, domain, trust_level, is_demo)').in('id', ids)
+      const { data: ev } = await admin.from('lead_evidence').select('*').in('lead_id', ids).order('created_at', { ascending: true })
+      const byLead = {}
+      for (const e of ev || []) (byLead[e.lead_id] ||= []).push(e)
+      leads = (rows || []).map((l) => ({ ...l, evidence: byLead[l.id] || [] })).sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id))
+    }
+    const totals = runs.reduce((a, r) => ({ found: a.found + (r.found || 0), verified: a.verified + (r.verified || 0), rejected: a.rejected + (r.rejected || 0), duplicated: a.duplicated + (r.duplicated || 0) }), { found: 0, verified: 0, rejected: 0, duplicated: 0 })
+    // record in the user's search history, linked to the first run
+    const parts = [query.trade, query.location, query.project_type].filter(Boolean)
+    await supabase.from('search_history').insert({
+      profile_id: userId, query_text: parts.join(' · ') || 'All opportunities', filters: query,
+      result_count: leads.length, search_run_id: runs[0]?.run_id || null,
+    })
+    return json({ query, runs, totals, leads })
+  }
+
   // -------- RUN PIPELINE (SOURCE -> RETRIEVE -> ... -> LEAD)
   if (path === 'admin/run-pipeline') {
     const userId = await getUserId(supabase)

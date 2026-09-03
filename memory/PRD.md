@@ -13,7 +13,18 @@ Pipeline: SOURCE → ROBOTS → RETRIEVE → EXTRACT → (DETAIL) → EVIDENCE �
   - Purge test data (`app/lib/pipeline/purge.js`): `POST /api/admin/purge {run_id|source_id}`, `DELETE /api/sources/:id`; demo source protected.
   - Scheduled runs (`app/lib/pipeline/scheduler.js`): `sources.config.schedule_minutes`; `POST /api/admin/run-due`, `GET /api/admin/due`, `GET /api/cron/run-due` (header `x-cron-secret` = `CRON_SECRET` in .env); in-process 60s ticker for long-lived server.
   - Detail fetch (`sources.config.fetch_details`, `max_detail_fetch` ≤ 25, 40s time budget): item pages retrieved (robots-checked, HTML only), extra evidence only for fields the feed did not state, dedup hash unaffected.
-- Phase 3+ — awaiting user prompt.
+- Phase 3 (first real data source) — DONE, backend + UI tested:
+  - Source: **CanadaBuys – Open Tender Notices** (official Gov. of Canada open-data CSV, Open Government Licence – Canada; user approved licensed access basis; website robots.txt disallows generic crawling — recorded on every run as a 'robots' log line, never silent). Facebook (user-pasted) rejected: login-gated, ToS forbids automated collection.
+  - `csv_dataset` connector (`app/lib/connectors/csvDataset.js`): slice-based RFC4180 parser keeping only mapped columns (24 MB / 16 ms for 7 MB file); every lead field = a named CSV column; lead URL = noticeURL column or documented CanadaBuys notice-page pattern from referenceNumber.
+  - Deterministic search filters (`app/lib/connectors/query.js`): trade keywords with leading word boundary ("door" ≠ "indoor"), location parts AND-ed with curated Fraser Valley/BC aliases (matched in location columns; only as capitalised proper nouns in prose), project_type text, publication date range, limit ≤ 20.
+  - `POST /api/discover/search` runs up to 4 active sources (trust-ordered, skipping known robots-blocked), returns leads + evidence (new + already-known duplicates), writes search_history with run link. Discover UI shows Project / Source / URL / Fields / Evidence / Verification with expandable evidence panel and explicit zero-result message.
+  - Verification states now: verified / unverified / rejected (needs_review no longer produced).
+  - Canonical test (Windows & Doors, Fraser Valley BC): 978 rows retrieved, 36 trade hits, 2 matched, 2 verified, 0 rejected, 0 fabricated. Missing most often: source-stated value (dataset never publishes), address (not mapped by design), contact phone (~50%).
+- Phase 4+ — awaiting user prompt.
+
+## Environment notes
+- Next dev server runs with a 512 MB heap cap and a memory watchdog that occasionally restarts the worker (brief ECONNREFUSED); production build would not have this.
+- No psql/DB connection string available in the workspace — schema changes need the Supabase DB password from the user (none were required for Phase 3).
 
 ## Live sources
 - Google News RSS `/rss/search` is DISALLOWED by news.google.com/robots.txt → correctly blocked by the guard (earlier Phase 2 test data from it was purged).

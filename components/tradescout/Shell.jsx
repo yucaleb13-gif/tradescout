@@ -77,7 +77,7 @@ export default function Shell({ auth, refreshAuth }) {
       <aside className="hidden md:flex md:w-64 flex-col bg-slate-900 border-r border-slate-800 fixed inset-y-0">
         <Brand />
         <div className="px-3 flex-1"><NavList /></div>
-        <div className="p-3 text-[10px] text-slate-500">Foundation build · live discovery not connected</div>
+        <div className="p-3 text-[10px] text-slate-500">Live discovery · approved sources only · nothing fabricated</div>
       </aside>
 
       <div className="flex-1 md:pl-64 flex flex-col min-h-screen">

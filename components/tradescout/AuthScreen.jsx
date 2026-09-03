@@ -52,7 +52,7 @@ export default function AuthScreen({ onAuthed }) {
             ))}
           </div>
         </div>
-        <p className="text-xs text-slate-500">Foundation build — live opportunity discovery is not connected yet.</p>
+        <p className="text-xs text-slate-500">Live discovery from approved public sources · every fact evidence-backed · nothing fabricated.</p>
       </div>
 
       {/* Auth forms */}

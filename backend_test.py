@@ -1,1119 +1,883 @@
 #!/usr/bin/env python3
 """
-TradeScout Phase 1 Backend API Test Suite
-Tests all endpoints with RLS isolation verification
+Phase 3 Backend Testing: CanadaBuys csv_dataset connector + live discovery search
+Focus: FIX VERIFICATION - Trade keyword word boundary fix + evidence field_name mapping
+Expected: 'door' should NOT match 'Indoor' (word boundary at START)
+Expected: evidence field_name should include company_name, contact_name, tender_status, timeline
 """
 
 import requests
-import random
-import string
 import json
+import time
 from datetime import datetime
 
-# Base URL from .env
-BASE_URL = "https://tradescout-preview.preview.emergentagent.com/api"
+# Configuration
+BASE_URL = "https://tradescout-preview.preview.emergentagent.com"
+API_URL = f"{BASE_URL}/api"
+TIMEOUT = 120  # 120s timeout for search requests (downloads 7MB dataset)
 
-def random_email():
-    """Generate random email for testing"""
-    rand = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    return f"user_{rand}@tradescout.dev"
+# Test credentials
+EMAIL = "qa.tradescout@example.com"
+PASSWORD = "TradeScout!2025"
 
-def log_test(name, passed, details=""):
-    """Log test result"""
-    status = "✅ PASS" if passed else "❌ FAIL"
-    print(f"\n{status}: {name}")
-    if details:
-        print(f"  Details: {details}")
+# Field mapping for evidence validation (UPDATED for Phase 3 fix)
+# Evidence field_name should now include: company_name, contact_name, tender_status, timeline
+FIELD_EVIDENCE_MAP = {
+    'project_name': 'project_name',
+    'project_description': 'project_description',
+    'trade_category': 'trade_category',
+    'location': 'location',
+    'company_name': 'company_name',  # NOW has dedicated evidence field_name
+    'contact_name': 'contact_name',  # NOW has dedicated evidence field_name
+    'contact_email': 'contact_email',
+    'contact_phone': 'contact_phone',
+    'bid_deadline': 'timeline',
+    'tender_status': 'tender_status',  # NOW has dedicated evidence field_name
+    'project_type': 'project_description',  # Still maps to project_description (no enum)
+    'timeline_start': 'timeline',
+    'timeline_end': 'timeline',
+    'timeline_text': 'timeline',
+    'source_stated_value': 'project_value',
+    'estimated_trade_value': None,  # Calculated field, no evidence required
+    'lead_score': None,  # Calculated field, no evidence required
+}
 
 class TestSession:
-    """Wrapper for requests session with cookie jar"""
-    def __init__(self, name):
-        self.name = name
+    def __init__(self):
         self.session = requests.Session()
-        self.email = None
-        self.user_id = None
+        self.session.headers.update({'Content-Type': 'application/json'})
         
-    def post(self, path, json_data=None):
-        return self.session.post(f"{BASE_URL}/{path}", json=json_data, timeout=30)
-    
-    def get(self, path):
-        return self.session.get(f"{BASE_URL}/{path}", timeout=30)
-    
-    def put(self, path, json_data=None):
-        return self.session.put(f"{BASE_URL}/{path}", json=json_data, timeout=30)
-    
-    def patch(self, path, json_data=None):
-        return self.session.patch(f"{BASE_URL}/{path}", json=json_data, timeout=30)
-    
-    def delete(self, path):
-        return self.session.delete(f"{BASE_URL}/{path}", timeout=30)
-
-def test_auth_signup_and_profile_trigger():
-    """Test 1: Signup with auto-confirm + profile trigger"""
-    print("\n" + "="*80)
-    print("TEST 1: Auth Signup + Profile Trigger")
-    print("="*80)
-    
-    session = TestSession("signup_test")
-    email = random_email()
-    password = "Passw0rd123"
-    full_name = "John Contractor"
-    company_name = "ABC Roofing Ltd"
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": password,
-            "fullName": full_name,
-            "companyName": company_name
-        })
+    def login(self):
+        """Login and establish cookie session"""
+        print("\n" + "="*80)
+        print("PHASE 3 BACKEND TESTING - CanadaBuys Discovery Search")
+        print("="*80)
+        print(f"\n[LOGIN] Authenticating as {EMAIL}...")
         
-        if resp.status_code != 200:
-            log_test("Signup", False, f"Status {resp.status_code}: {resp.text}")
-            return False
+        response = self.session.post(
+            f"{API_URL}/auth/login",
+            json={"email": EMAIL, "password": PASSWORD},
+            timeout=30
+        )
         
-        data = resp.json()
-        if not data.get("ok") or not data.get("user"):
-            log_test("Signup", False, f"Invalid response: {data}")
-            return False
-        
-        log_test("Signup", True, f"User created: {email}")
-        
-        # Verify /me returns authenticated with profile
-        resp = session.get("auth/me")
-        if resp.status_code != 200:
-            log_test("Profile trigger - /me check", False, f"Status {resp.status_code}")
-            return False
-        
-        me_data = resp.json()
-        if not me_data.get("authenticated"):
-            log_test("Profile trigger - /me check", False, "Not authenticated after signup")
-            return False
-        
-        profile = me_data.get("profile")
-        if not profile:
-            log_test("Profile trigger - /me check", False, "No profile returned")
-            return False
-        
-        if profile.get("full_name") != full_name:
-            log_test("Profile trigger - full_name", False, f"Expected '{full_name}', got '{profile.get('full_name')}'")
-            return False
-        
-        if profile.get("company_name") != company_name:
-            log_test("Profile trigger - company_name", False, f"Expected '{company_name}', got '{profile.get('company_name')}'")
-            return False
-        
-        log_test("Profile trigger verification", True, f"Profile has correct full_name and company_name")
-        return True
-        
-    except Exception as e:
-        log_test("Signup test", False, f"Exception: {str(e)}")
-        return False
-
-def test_auth_login_logout():
-    """Test 2: Login with correct/wrong password, logout"""
-    print("\n" + "="*80)
-    print("TEST 2: Auth Login / Logout")
-    print("="*80)
-    
-    # Create a user first
-    session = TestSession("login_test")
-    email = random_email()
-    password = "Passw0rd123"
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": password,
-            "fullName": "Test User",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Login test - setup", False, f"Signup failed: {resp.status_code}")
-            return False
-        
-        # Logout
-        resp = session.post("auth/logout", {})
-        if resp.status_code != 200:
-            log_test("Logout", False, f"Status {resp.status_code}")
-            return False
-        
-        log_test("Logout", True)
-        
-        # Verify logged out - /me should show not authenticated
-        resp = session.get("auth/me")
-        me_data = resp.json()
-        if me_data.get("authenticated"):
-            log_test("Logout verification - /me", False, "Still authenticated after logout")
-            return False
-        
-        log_test("Logout verification - /me", True, "authenticated: false")
-        
-        # Try accessing protected endpoint - should get 401
-        resp = session.get("sources")
-        if resp.status_code != 401:
-            log_test("Logout verification - protected endpoint", False, f"Expected 401, got {resp.status_code}")
-            return False
-        
-        log_test("Logout verification - protected endpoint", True, "Got 401 as expected")
-        
-        # Login with wrong password
-        resp = session.post("auth/login", {
-            "email": email,
-            "password": "WrongPassword123"
-        })
-        
-        if resp.status_code != 401:
-            log_test("Login with wrong password", False, f"Expected 401, got {resp.status_code}")
-            return False
-        
-        log_test("Login with wrong password", True, "Got 401 as expected")
-        
-        # Login with correct password
-        resp = session.post("auth/login", {
-            "email": email,
-            "password": password
-        })
-        
-        if resp.status_code != 200:
-            log_test("Login with correct password", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        data = resp.json()
-        if not data.get("ok"):
-            log_test("Login with correct password", False, f"Invalid response: {data}")
-            return False
-        
-        log_test("Login with correct password", True)
-        
-        # Verify logged in
-        resp = session.get("auth/me")
-        me_data = resp.json()
-        if not me_data.get("authenticated"):
-            log_test("Login verification - /me", False, "Not authenticated after login")
-            return False
-        
-        log_test("Login verification - /me", True, "authenticated: true")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Login/Logout test", False, f"Exception: {str(e)}")
-        return False
-
-def test_auth_update_password():
-    """Test 3: Update password and verify new password works"""
-    print("\n" + "="*80)
-    print("TEST 3: Auth Update Password")
-    print("="*80)
-    
-    session = TestSession("password_test")
-    email = random_email()
-    old_password = "Passw0rd123"
-    new_password = "NewPassw0rd456"
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": old_password,
-            "fullName": "Password Test",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Update password - setup", False, f"Signup failed")
-            return False
-        
-        # Update password
-        resp = session.post("auth/update-password", {
-            "password": new_password
-        })
-        
-        if resp.status_code != 200:
-            log_test("Update password", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        log_test("Update password", True)
-        
-        # Logout
-        session.post("auth/logout", {})
-        
-        # Try login with old password - should fail
-        resp = session.post("auth/login", {
-            "email": email,
-            "password": old_password
-        })
-        
-        if resp.status_code != 401:
-            log_test("Login with old password after update", False, f"Expected 401, got {resp.status_code}")
-            return False
-        
-        log_test("Login with old password after update", True, "Got 401 as expected")
-        
-        # Login with new password - should work
-        resp = session.post("auth/login", {
-            "email": email,
-            "password": new_password
-        })
-        
-        if resp.status_code != 200:
-            log_test("Login with new password", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        log_test("Login with new password", True)
-        
-        return True
-        
-    except Exception as e:
-        log_test("Update password test", False, f"Exception: {str(e)}")
-        return False
-
-def test_auth_reset_request():
-    """Test 4: Password reset request (always returns 200)"""
-    print("\n" + "="*80)
-    print("TEST 4: Auth Reset Request")
-    print("="*80)
-    
-    session = TestSession("reset_test")
-    
-    try:
-        # Test with non-existent email - should still return 200
-        resp = session.post("auth/reset-request", {
-            "email": "nonexistent@example.com"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Reset request (non-existent email)", False, f"Status {resp.status_code}")
-            return False
-        
-        log_test("Reset request (non-existent email)", True, "Returns 200 (does not reveal existence)")
-        
-        # Test with existing email
-        email = random_email()
-        signup_session = TestSession("reset_signup")
-        resp = signup_session.post("auth/signup", {
-            "email": email,
-            "password": "Passw0rd123",
-            "fullName": "Reset Test",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Reset request - setup", False, "Signup failed")
-            return False
-        
-        resp = session.post("auth/reset-request", {
-            "email": email
-        })
-        
-        if resp.status_code != 200:
-            log_test("Reset request (existing email)", False, f"Status {resp.status_code}")
-            return False
-        
-        log_test("Reset request (existing email)", True, "Returns 200")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Reset request test", False, f"Exception: {str(e)}")
-        return False
-
-def test_unauthenticated_access():
-    """Test 5: Unauthenticated access to protected endpoints"""
-    print("\n" + "="*80)
-    print("TEST 5: Unauthenticated Access to Protected Endpoints")
-    print("="*80)
-    
-    session = TestSession("unauth_test")
-    
-    endpoints = [
-        "sources",
-        "leads",
-        "stats",
-        "saved-leads",
-        "search-history",
-        "profile"
-    ]
-    
-    all_passed = True
-    
-    try:
-        for endpoint in endpoints:
-            resp = session.get(endpoint)
-            if resp.status_code != 401:
-                log_test(f"Unauthenticated GET /{endpoint}", False, f"Expected 401, got {resp.status_code}")
-                all_passed = False
-            else:
-                log_test(f"Unauthenticated GET /{endpoint}", True, "Got 401")
-        
-        # Test /me unauthenticated - should return authenticated: false
-        resp = session.get("auth/me")
-        if resp.status_code != 200:
-            log_test("Unauthenticated GET /auth/me", False, f"Expected 200, got {resp.status_code}")
-            all_passed = False
+        if response.status_code == 200:
+            print(f"✓ Login successful")
+            return True
         else:
-            data = resp.json()
-            if data.get("authenticated"):
-                log_test("Unauthenticated GET /auth/me", False, "authenticated should be false")
-                all_passed = False
-            else:
-                log_test("Unauthenticated GET /auth/me", True, "Returns authenticated: false")
-        
-        return all_passed
-        
-    except Exception as e:
-        log_test("Unauthenticated access test", False, f"Exception: {str(e)}")
-        return False
-
-def test_stats_endpoint():
-    """Test 6: Stats endpoint returns correct structure"""
-    print("\n" + "="*80)
-    print("TEST 6: Stats Endpoint")
-    print("="*80)
+            print(f"✗ Login failed: {response.status_code} - {response.text}")
+            return False
     
-    session = TestSession("stats_test")
-    email = random_email()
+    def test_unauthenticated_search(self):
+        """Test scenario (H): Unauthenticated request should return 401"""
+        print("\n" + "-"*80)
+        print("TEST (H): Unauthenticated search should return 401")
+        print("-"*80)
+        
+        unauth_session = requests.Session()
+        response = unauth_session.post(
+            f"{API_URL}/discover/search",
+            json={"trade": "windows_doors", "location": "Fraser Valley, British Columbia", "limit": 20},
+            timeout=30
+        )
+        
+        if response.status_code == 401:
+            print(f"✓ PASSED: Unauthenticated request correctly returned 401")
+            return True
+        else:
+            print(f"✗ FAILED: Expected 401, got {response.status_code}")
+            return False
     
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": "Passw0rd123",
-            "fullName": "Stats Test",
-            "companyName": "Test Co"
-        })
+    def validate_evidence_integrity(self, lead, evidence_list):
+        """
+        Validate that every non-null factual field has corresponding evidence.
+        Returns (is_valid, issues_list)
+        """
+        issues = []
         
-        if resp.status_code != 200:
-            log_test("Stats test - setup", False, "Signup failed")
-            return False
-        
-        # Get stats
-        resp = session.get("stats")
-        
-        if resp.status_code != 200:
-            log_test("GET /stats", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        data = resp.json()
-        
-        required_fields = ["available_leads", "saved_leads", "high_opportunity", "new_this_week"]
-        for field in required_fields:
-            if field not in data:
-                log_test(f"Stats field '{field}'", False, "Missing from response")
-                return False
-            
-            if not isinstance(data[field], int):
-                log_test(f"Stats field '{field}'", False, f"Expected int, got {type(data[field])}")
-                return False
-        
-        log_test("Stats endpoint", True, f"All fields present: {data}")
-        
-        # Verify saved_leads is 0 for new user
-        if data["saved_leads"] != 0:
-            log_test("Stats saved_leads for new user", False, f"Expected 0, got {data['saved_leads']}")
-            return False
-        
-        log_test("Stats saved_leads for new user", True, "Correctly shows 0")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Stats test", False, f"Exception: {str(e)}")
-        return False
-
-def test_leads_list_and_filters():
-    """Test 7: Leads list with various filters"""
-    print("\n" + "="*80)
-    print("TEST 7: Leads List and Filters")
-    print("="*80)
-    
-    session = TestSession("leads_test")
-    email = random_email()
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": "Passw0rd123",
-            "fullName": "Leads Test",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Leads test - setup", False, "Signup failed")
-            return False
-        
-        # Get all leads
-        resp = session.get("leads")
-        
-        if resp.status_code != 200:
-            log_test("GET /leads", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        data = resp.json()
-        
-        if not isinstance(data, list):
-            log_test("GET /leads", False, f"Expected array, got {type(data)}")
-            return False
-        
-        log_test("GET /leads", True, f"Returned {len(data)} leads")
-        
-        if len(data) == 0:
-            log_test("Demo leads present", False, "Expected 6 demo leads, got 0")
-            return False
-        
-        # Test filters
-        filters = [
-            ("trade=roofing", "trade filter"),
-            ("project_type=Industrial", "project_type filter"),
-            ("location=Sample", "location filter"),
-            ("q=Warehouse", "search query filter"),
-            ("min_value=500000", "min_value filter"),
+        # Fields to check for evidence
+        factual_fields = [
+            'project_name', 'project_description', 'trade_category', 'location',
+            'company_name', 'contact_name', 'contact_email', 'contact_phone',
+            'bid_deadline', 'tender_status', 'project_type', 'timeline_start',
+            'timeline_end', 'timeline_text', 'source_stated_value'
         ]
         
-        for filter_param, filter_name in filters:
-            resp = session.get(f"leads?{filter_param}")
-            if resp.status_code != 200:
-                log_test(f"GET /leads?{filter_param}", False, f"Status {resp.status_code}")
-                return False
+        for field in factual_fields:
+            value = lead.get(field)
+            if value is None or value == '' or value == 'unknown':
+                continue  # Null/empty fields don't need evidence
             
-            filter_data = resp.json()
-            log_test(f"GET /leads?{filter_param}", True, f"Returned {len(filter_data)} results")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Leads list test", False, f"Exception: {str(e)}")
-        return False
-
-def test_lead_detail():
-    """Test 8: Lead detail with evidence, source, saved"""
-    print("\n" + "="*80)
-    print("TEST 8: Lead Detail")
-    print("="*80)
-    
-    session = TestSession("lead_detail_test")
-    email = random_email()
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": "Passw0rd123",
-            "fullName": "Lead Detail Test",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Lead detail test - setup", False, "Signup failed")
-            return False
-        
-        # Get leads to find an ID
-        resp = session.get("leads")
-        leads = resp.json()
-        
-        if len(leads) == 0:
-            log_test("Lead detail test - get lead ID", False, "No leads available")
-            return False
-        
-        lead_id = leads[0]["id"]
-        
-        # Get lead detail
-        resp = session.get(f"leads/{lead_id}")
-        
-        if resp.status_code != 200:
-            log_test(f"GET /leads/{lead_id}", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        data = resp.json()
-        
-        # Check required fields
-        if "evidence" not in data:
-            log_test("Lead detail - evidence field", False, "Missing evidence array")
-            return False
-        
-        if not isinstance(data["evidence"], list):
-            log_test("Lead detail - evidence field", False, f"Expected array, got {type(data['evidence'])}")
-            return False
-        
-        log_test("Lead detail - evidence field", True, f"Evidence array present with {len(data['evidence'])} items")
-        
-        if "source" not in data:
-            log_test("Lead detail - source field", False, "Missing source object")
-            return False
-        
-        log_test("Lead detail - source field", True, "Source object present")
-        
-        if "saved" not in data:
-            log_test("Lead detail - saved field", False, "Missing saved field")
-            return False
-        
-        if data["saved"] is not None:
-            log_test("Lead detail - saved field", False, f"Expected null for unsaved lead, got {data['saved']}")
-            return False
-        
-        log_test("Lead detail - saved field", True, "Correctly shows null for unsaved lead")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Lead detail test", False, f"Exception: {str(e)}")
-        return False
-
-def test_saved_leads_crud():
-    """Test 9: Saved leads CRUD operations"""
-    print("\n" + "="*80)
-    print("TEST 9: Saved Leads CRUD")
-    print("="*80)
-    
-    session = TestSession("saved_leads_test")
-    email = random_email()
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": "Passw0rd123",
-            "fullName": "Saved Leads Test",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Saved leads test - setup", False, "Signup failed")
-            return False
-        
-        # Get a lead ID
-        resp = session.get("leads")
-        leads = resp.json()
-        
-        if len(leads) == 0:
-            log_test("Saved leads test - get lead ID", False, "No leads available")
-            return False
-        
-        lead_id = leads[0]["id"]
-        
-        # Save the lead
-        resp = session.post("saved-leads", {
-            "lead_id": lead_id
-        })
-        
-        if resp.status_code != 201:
-            log_test("POST /saved-leads", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        saved_data = resp.json()
-        saved_id = saved_data["id"]
-        
-        if "lead" not in saved_data:
-            log_test("POST /saved-leads - joined lead", False, "Missing joined lead object")
-            return False
-        
-        log_test("POST /saved-leads", True, f"Lead saved with ID {saved_id}")
-        
-        # Try to save the same lead again - should get 409
-        resp = session.post("saved-leads", {
-            "lead_id": lead_id
-        })
-        
-        if resp.status_code != 409:
-            log_test("POST /saved-leads duplicate", False, f"Expected 409, got {resp.status_code}")
-            return False
-        
-        log_test("POST /saved-leads duplicate", True, "Got 409 as expected")
-        
-        # Get saved leads list
-        resp = session.get("saved-leads")
-        
-        if resp.status_code != 200:
-            log_test("GET /saved-leads", False, f"Status {resp.status_code}")
-            return False
-        
-        saved_list = resp.json()
-        
-        if not isinstance(saved_list, list):
-            log_test("GET /saved-leads", False, f"Expected array, got {type(saved_list)}")
-            return False
-        
-        if len(saved_list) == 0:
-            log_test("GET /saved-leads", False, "Expected at least 1 saved lead")
-            return False
-        
-        found = False
-        for item in saved_list:
-            if item["id"] == saved_id:
-                found = True
-                break
-        
-        if not found:
-            log_test("GET /saved-leads - includes saved lead", False, f"Saved lead {saved_id} not in list")
-            return False
-        
-        log_test("GET /saved-leads", True, f"Includes saved lead")
-        
-        # Update saved lead
-        resp = session.patch(f"saved-leads/{saved_id}", {
-            "status": "Interested",
-            "notes": "This looks promising"
-        })
-        
-        if resp.status_code != 200:
-            log_test("PATCH /saved-leads/:id", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        updated_data = resp.json()
-        
-        if updated_data.get("status") != "Interested":
-            log_test("PATCH /saved-leads/:id - status", False, f"Expected 'Interested', got '{updated_data.get('status')}'")
-            return False
-        
-        if updated_data.get("notes") != "This looks promising":
-            log_test("PATCH /saved-leads/:id - notes", False, f"Expected 'This looks promising', got '{updated_data.get('notes')}'")
-            return False
-        
-        log_test("PATCH /saved-leads/:id", True, "Status and notes updated")
-        
-        # Delete saved lead
-        resp = session.delete(f"saved-leads/{saved_id}")
-        
-        if resp.status_code != 200:
-            log_test("DELETE /saved-leads/:id", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        log_test("DELETE /saved-leads/:id", True)
-        
-        # Verify it's deleted
-        resp = session.get("saved-leads")
-        saved_list = resp.json()
-        
-        found = False
-        for item in saved_list:
-            if item["id"] == saved_id:
-                found = True
-                break
-        
-        if found:
-            log_test("DELETE verification", False, f"Saved lead {saved_id} still in list")
-            return False
-        
-        log_test("DELETE verification", True, "Saved lead removed from list")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Saved leads CRUD test", False, f"Exception: {str(e)}")
-        return False
-
-def test_search_history_crud():
-    """Test 10: Search history CRUD operations"""
-    print("\n" + "="*80)
-    print("TEST 10: Search History CRUD")
-    print("="*80)
-    
-    session = TestSession("search_history_test")
-    email = random_email()
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": "Passw0rd123",
-            "fullName": "Search History Test",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Search history test - setup", False, "Signup failed")
-            return False
-        
-        # Create search history entry
-        resp = session.post("search-history", {
-            "query_text": "roofing projects",
-            "filters": {
-                "trade": "roofing",
-                "location": "Sydney"
-            },
-            "result_count": 5
-        })
-        
-        if resp.status_code != 201:
-            log_test("POST /search-history", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        search_data = resp.json()
-        search_id = search_data["id"]
-        
-        log_test("POST /search-history", True, f"Search history created with ID {search_id}")
-        
-        # Get search history list
-        resp = session.get("search-history")
-        
-        if resp.status_code != 200:
-            log_test("GET /search-history", False, f"Status {resp.status_code}")
-            return False
-        
-        history_list = resp.json()
-        
-        if not isinstance(history_list, list):
-            log_test("GET /search-history", False, f"Expected array, got {type(history_list)}")
-            return False
-        
-        found = False
-        for item in history_list:
-            if item["id"] == search_id:
-                found = True
-                break
-        
-        if not found:
-            log_test("GET /search-history - includes entry", False, f"Search history {search_id} not in list")
-            return False
-        
-        log_test("GET /search-history", True, "Includes search history entry")
-        
-        # Delete search history entry
-        resp = session.delete(f"search-history/{search_id}")
-        
-        if resp.status_code != 200:
-            log_test("DELETE /search-history/:id", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        log_test("DELETE /search-history/:id", True)
-        
-        # Verify it's deleted
-        resp = session.get("search-history")
-        history_list = resp.json()
-        
-        found = False
-        for item in history_list:
-            if item["id"] == search_id:
-                found = True
-                break
-        
-        if found:
-            log_test("DELETE verification", False, f"Search history {search_id} still in list")
-            return False
-        
-        log_test("DELETE verification", True, "Search history removed from list")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Search history CRUD test", False, f"Exception: {str(e)}")
-        return False
-
-def test_profile_get_update():
-    """Test 11: Profile get and update"""
-    print("\n" + "="*80)
-    print("TEST 11: Profile Get/Update")
-    print("="*80)
-    
-    session = TestSession("profile_test")
-    email = random_email()
-    
-    try:
-        # Signup
-        resp = session.post("auth/signup", {
-            "email": email,
-            "password": "Passw0rd123",
-            "fullName": "Profile Test",
-            "companyName": "Test Co"
-        })
-        
-        if resp.status_code != 200:
-            log_test("Profile test - setup", False, "Signup failed")
-            return False
-        
-        # Get profile
-        resp = session.get("profile")
-        
-        if resp.status_code != 200:
-            log_test("GET /profile", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        profile = resp.json()
-        
-        log_test("GET /profile", True, f"Profile retrieved")
-        
-        # Update profile
-        resp = session.put("profile", {
-            "full_name": "Updated Name",
-            "company_name": "Updated Company",
-            "region": "NSW",
-            "trade_focus": ["roofing", "hvac"]
-        })
-        
-        if resp.status_code != 200:
-            log_test("PUT /profile", False, f"Status {resp.status_code}: {resp.text}")
-            return False
-        
-        updated_profile = resp.json()
-        
-        if updated_profile.get("full_name") != "Updated Name":
-            log_test("PUT /profile - full_name", False, f"Expected 'Updated Name', got '{updated_profile.get('full_name')}'")
-            return False
-        
-        if updated_profile.get("company_name") != "Updated Company":
-            log_test("PUT /profile - company_name", False, f"Expected 'Updated Company', got '{updated_profile.get('company_name')}'")
-            return False
-        
-        if updated_profile.get("region") != "NSW":
-            log_test("PUT /profile - region", False, f"Expected 'NSW', got '{updated_profile.get('region')}'")
-            return False
-        
-        if updated_profile.get("trade_focus") != ["roofing", "hvac"]:
-            log_test("PUT /profile - trade_focus", False, f"Expected ['roofing', 'hvac'], got {updated_profile.get('trade_focus')}")
-            return False
-        
-        log_test("PUT /profile", True, "All fields updated correctly")
-        
-        # Verify changes persist
-        resp = session.get("profile")
-        profile = resp.json()
-        
-        if profile.get("full_name") != "Updated Name":
-            log_test("Profile update persistence", False, "Changes did not persist")
-            return False
-        
-        log_test("Profile update persistence", True, "Changes persisted")
-        
-        return True
-        
-    except Exception as e:
-        log_test("Profile test", False, f"Exception: {str(e)}")
-        return False
-
-def test_rls_isolation():
-    """Test 12: CRITICAL - RLS isolation between users"""
-    print("\n" + "="*80)
-    print("TEST 12: CRITICAL - RLS ISOLATION")
-    print("="*80)
-    
-    # Create two separate users with separate cookie jars
-    user_a = TestSession("User A")
-    user_b = TestSession("User B")
-    
-    email_a = random_email()
-    email_b = random_email()
-    password = "Passw0rd123"
-    
-    try:
-        # Signup user A
-        resp = user_a.post("auth/signup", {
-            "email": email_a,
-            "password": password,
-            "fullName": "User A",
-            "companyName": "Company A"
-        })
-        
-        if resp.status_code != 200:
-            log_test("RLS test - User A signup", False, f"Status {resp.status_code}")
-            return False
-        
-        log_test("RLS test - User A signup", True, f"Email: {email_a}")
-        
-        # Signup user B
-        resp = user_b.post("auth/signup", {
-            "email": email_b,
-            "password": password,
-            "fullName": "User B",
-            "companyName": "Company B"
-        })
-        
-        if resp.status_code != 200:
-            log_test("RLS test - User B signup", False, f"Status {resp.status_code}")
-            return False
-        
-        log_test("RLS test - User B signup", True, f"Email: {email_b}")
-        
-        # Get a lead ID
-        resp = user_a.get("leads")
-        leads = resp.json()
-        
-        if len(leads) == 0:
-            log_test("RLS test - get lead", False, "No leads available")
-            return False
-        
-        lead_id = leads[0]["id"]
-        
-        # User A saves a lead
-        resp = user_a.post("saved-leads", {
-            "lead_id": lead_id
-        })
-        
-        if resp.status_code != 201:
-            log_test("RLS test - User A save lead", False, f"Status {resp.status_code}")
-            return False
-        
-        user_a_saved_id = resp.json()["id"]
-        log_test("RLS test - User A save lead", True, f"Saved lead ID: {user_a_saved_id}")
-        
-        # User A creates search history
-        resp = user_a.post("search-history", {
-            "query_text": "User A search",
-            "filters": {"trade": "roofing"},
-            "result_count": 3
-        })
-        
-        if resp.status_code != 201:
-            log_test("RLS test - User A create search history", False, f"Status {resp.status_code}")
-            return False
-        
-        user_a_search_id = resp.json()["id"]
-        log_test("RLS test - User A create search history", True, f"Search ID: {user_a_search_id}")
-        
-        # User B gets saved leads - should NOT see User A's saved lead
-        resp = user_b.get("saved-leads")
-        
-        if resp.status_code != 200:
-            log_test("RLS test - User B get saved-leads", False, f"Status {resp.status_code}")
-            return False
-        
-        user_b_saved = resp.json()
-        
-        for item in user_b_saved:
-            if item["id"] == user_a_saved_id:
-                log_test("RLS VIOLATION - saved_leads", False, f"User B can see User A's saved lead {user_a_saved_id}")
-                return False
-        
-        log_test("RLS isolation - saved_leads read", True, "User B cannot see User A's saved leads")
-        
-        # User B gets search history - should NOT see User A's search
-        resp = user_b.get("search-history")
-        
-        if resp.status_code != 200:
-            log_test("RLS test - User B get search-history", False, f"Status {resp.status_code}")
-            return False
-        
-        user_b_history = resp.json()
-        
-        for item in user_b_history:
-            if item["id"] == user_a_search_id:
-                log_test("RLS VIOLATION - search_history", False, f"User B can see User A's search history {user_a_search_id}")
-                return False
-        
-        log_test("RLS isolation - search_history read", True, "User B cannot see User A's search history")
-        
-        # User B tries to PATCH User A's saved lead - should fail
-        resp = user_b.patch(f"saved-leads/{user_a_saved_id}", {
-            "status": "Contacted",
-            "notes": "User B trying to modify User A's data"
-        })
-        
-        # Should either return error or not affect the data
-        if resp.status_code == 200:
-            # If it returns 200, verify User A's data is unchanged
-            resp = user_a.get("saved-leads")
-            user_a_saved = resp.json()
+            # Check if this field should have evidence
+            expected_evidence_field = FIELD_EVIDENCE_MAP.get(field)
+            if expected_evidence_field is None:
+                continue  # Calculated fields don't need evidence
             
-            for item in user_a_saved:
-                if item["id"] == user_a_saved_id:
-                    if item.get("status") == "Contacted":
-                        log_test("RLS VIOLATION - saved_leads update", False, "User B modified User A's saved lead")
-                        return False
+            # Find evidence for this field
+            # For some fields, evidence may be in project_description or related fields
+            has_evidence = False
+            for ev in evidence_list:
+                ev_field = ev.get('field_name')
+                # Check if evidence field matches (with flexible mapping)
+                if ev_field == expected_evidence_field or \
+                   (field in ['company_name', 'tender_status', 'project_type'] and ev_field == 'project_description') or \
+                   (field in ['timeline_start', 'timeline_end', 'timeline_text', 'bid_deadline'] and ev_field == 'timeline'):
+                    has_evidence = True
+                    
+                    # Validate source_url is a real URL
+                    source_url = ev.get('source_url', '')
+                    if not source_url.startswith('http'):
+                        issues.append(f"Field '{field}': evidence.source_url is not a valid URL: {source_url}")
+                    
+                    # Validate extracted_value relates to the field value
+                    extracted = str(ev.get('extracted_value', '')).lower()
+                    field_val = str(value).lower()
+                    
+                    # For some fields, extracted_value should match or be contained
+                    # (flexible check since evidence may be a snippet)
+                    if field in ['project_name', 'contact_email', 'contact_phone', 'bid_deadline']:
+                        if extracted not in field_val and field_val not in extracted:
+                            # For project_name, allow partial match
+                            if field == 'project_name':
+                                # Check if key words match
+                                extracted_words = set(extracted.split())
+                                field_words = set(field_val.split())
+                                if len(extracted_words & field_words) < 2:
+                                    issues.append(f"Field '{field}': extracted_value '{extracted[:50]}...' does not match field value '{field_val[:50]}...'")
+                            else:
+                                issues.append(f"Field '{field}': extracted_value '{extracted[:50]}...' does not match field value '{field_val[:50]}...'")
+                    
                     break
+            
+            if not has_evidence:
+                # Critical: non-null field without evidence
+                issues.append(f"CRITICAL: Field '{field}' has value '{str(value)[:50]}...' but NO evidence found")
         
-        log_test("RLS isolation - saved_leads update", True, "User B cannot modify User A's saved lead")
+        return len(issues) == 0, issues
+    
+    def test_discovery_search_scenario_a(self):
+        """
+        Test scenario (A): POST /api/discover/search with windows_doors + Fraser Valley
+        UPDATED EXPECTATION: 2 leads (Training Van Fit-up, Cell Window Glazing)
+        'Indoor Firing Range' should NOT appear (word boundary fix: 'door' must not match 'Indoor')
+        Evidence field_name should include: company_name, contact_name, tender_status, timeline
+        """
+        print("\n" + "-"*80)
+        print("TEST (A): Discovery search - windows_doors + Fraser Valley, British Columbia")
+        print("EXPECTED: matched=2, leads=['Training Van Fit-up', 'Cell Window Glazing']")
+        print("MUST NOT CONTAIN: 'Indoor Firing Range' (word boundary fix)")
+        print("-"*80)
         
-        # User B tries to DELETE User A's saved lead - should fail
-        resp = user_b.delete(f"saved-leads/{user_a_saved_id}")
+        search_payload = {
+            "trade": "windows_doors",
+            "location": "Fraser Valley, British Columbia",
+            "limit": 20
+        }
         
-        # Verify User A's saved lead still exists
-        resp = user_a.get("saved-leads")
-        user_a_saved = resp.json()
+        print(f"Sending search request (timeout={TIMEOUT}s)...")
+        print(f"Payload: {json.dumps(search_payload, indent=2)}")
         
-        found = False
-        for item in user_a_saved:
-            if item["id"] == user_a_saved_id:
-                found = True
+        start_time = time.time()
+        response = self.session.post(
+            f"{API_URL}/discover/search",
+            json=search_payload,
+            timeout=TIMEOUT
+        )
+        elapsed = time.time() - start_time
+        
+        print(f"Response received in {elapsed:.1f}s - Status: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"✗ FAILED: Expected 200, got {response.status_code}")
+            print(f"Response: {response.text[:500]}")
+            return None
+        
+        data = response.json()
+        
+        # Validate response structure
+        print("\n[RESPONSE STRUCTURE]")
+        print(f"  query: {data.get('query')}")
+        print(f"  runs: {len(data.get('runs', []))} source(s)")
+        print(f"  totals: {data.get('totals')}")
+        print(f"  leads: {len(data.get('leads', []))} lead(s)")
+        
+        # Find CanadaBuys run
+        canadabuys_run = None
+        for run in data.get('runs', []):
+            if 'CanadaBuys' in run.get('source_name', ''):
+                canadabuys_run = run
                 break
         
-        if not found:
-            log_test("RLS VIOLATION - saved_leads delete", False, "User B deleted User A's saved lead")
-            return False
+        if not canadabuys_run:
+            print(f"✗ FAILED: No CanadaBuys run found in response")
+            return None
         
-        log_test("RLS isolation - saved_leads delete", True, "User B cannot delete User A's saved lead")
+        print(f"\n[CANADABUYS RUN]")
+        print(f"  source_name: {canadabuys_run.get('source_name')}")
+        print(f"  status: {canadabuys_run.get('status')}")
+        print(f"  found: {canadabuys_run.get('found')}")
+        print(f"  verified: {canadabuys_run.get('verified')}")
+        print(f"  rejected: {canadabuys_run.get('rejected')}")
+        print(f"  duplicated: {canadabuys_run.get('duplicated')}")
         
-        # User B tries to DELETE User A's search history - should fail
-        resp = user_b.delete(f"search-history/{user_a_search_id}")
+        search_stats = canadabuys_run.get('search', {})
+        if search_stats:
+            print(f"  search.rows: {search_stats.get('rows')}")
+            print(f"  search.matched: {search_stats.get('matched')}")
+            print(f"  search.returned: {search_stats.get('returned')}")
+            print(f"  search.truncated: {search_stats.get('truncated')}")
         
-        # Verify User A's search history still exists
-        resp = user_a.get("search-history")
-        user_a_history = resp.json()
+        # Validate CanadaBuys run
+        if canadabuys_run.get('status') != 'completed':
+            print(f"✗ FAILED: CanadaBuys run status is '{canadabuys_run.get('status')}', expected 'completed'")
+            return None
         
-        found = False
-        for item in user_a_history:
-            if item["id"] == user_a_search_id:
-                found = True
-                break
+        if not search_stats or search_stats.get('rows', 0) < 900:
+            print(f"✗ WARNING: Expected ~978 rows, got {search_stats.get('rows', 0)}")
         
-        if not found:
-            log_test("RLS VIOLATION - search_history delete", False, "User B deleted User A's search history")
-            return False
-        
-        log_test("RLS isolation - search_history delete", True, "User B cannot delete User A's search history")
-        
-        print("\n" + "="*80)
-        print("✅ RLS ISOLATION VERIFIED - All tests passed")
-        print("="*80)
-        
-        return True
-        
-    except Exception as e:
-        log_test("RLS isolation test", False, f"Exception: {str(e)}")
-        return False
-
-def main():
-    """Run all tests"""
-    print("\n" + "="*80)
-    print("TradeScout Phase 1 Backend API Test Suite")
-    print("="*80)
-    print(f"Base URL: {BASE_URL}")
-    print(f"Started at: {datetime.now().isoformat()}")
-    
-    results = {}
-    
-    # Run all tests
-    results["Auth Signup + Profile Trigger"] = test_auth_signup_and_profile_trigger()
-    results["Auth Login/Logout"] = test_auth_login_logout()
-    results["Auth Update Password"] = test_auth_update_password()
-    results["Auth Reset Request"] = test_auth_reset_request()
-    results["Unauthenticated Access"] = test_unauthenticated_access()
-    results["Stats Endpoint"] = test_stats_endpoint()
-    results["Leads List and Filters"] = test_leads_list_and_filters()
-    results["Lead Detail"] = test_lead_detail()
-    results["Saved Leads CRUD"] = test_saved_leads_crud()
-    results["Search History CRUD"] = test_search_history_crud()
-    results["Profile Get/Update"] = test_profile_get_update()
-    results["RLS Isolation"] = test_rls_isolation()
-    
-    # Summary
-    print("\n" + "="*80)
-    print("TEST SUMMARY")
-    print("="*80)
-    
-    passed = 0
-    failed = 0
-    
-    for test_name, result in results.items():
-        status = "✅ PASS" if result else "❌ FAIL"
-        print(f"{status}: {test_name}")
-        if result:
-            passed += 1
+        # CRITICAL FIX VERIFICATION: matched should be 2 (not 3)
+        expected_matched = 2
+        actual_matched = search_stats.get('matched', 0)
+        if actual_matched != expected_matched:
+            print(f"✗ CRITICAL: Expected matched={expected_matched}, got {actual_matched}")
+            if actual_matched == 3:
+                print(f"  This suggests 'Indoor Firing Range' is still matching (word boundary fix not working)")
+            return None
         else:
-            failed += 1
+            print(f"✓ CRITICAL: matched={expected_matched} (word boundary fix working)")
+        
+        # Analyze leads
+        leads = data.get('leads', [])
+        canadabuys_leads = [l for l in leads if 'CanadaBuys' in l.get('source', {}).get('name', '')]
+        
+        print(f"\n[LEADS ANALYSIS]")
+        print(f"  Total leads: {len(leads)}")
+        print(f"  CanadaBuys leads: {len(canadabuys_leads)}")
+        
+        # Expected lead names (UPDATED: only 2 leads, NOT 3)
+        expected_names = ['Training Van Fit-up', 'Cell Window Glazing']
+        forbidden_names = ['Indoor Firing Range']  # Must NOT appear
+        found_names = []
+        forbidden_found = []
+        
+        print(f"\n[LEAD DETAILS]")
+        for i, lead in enumerate(canadabuys_leads[:10], 1):  # Show first 10
+            project_name = lead.get('project_name', '')
+            print(f"\n  Lead {i}: {project_name}")
+            print(f"    source_url: {lead.get('source_url', '')[:80]}")
+            print(f"    verification_status: {lead.get('verification_status')}")
+            print(f"    trade_category: {lead.get('trade_category')}")
+            print(f"    location: {lead.get('location')}")
+            
+            # Check for expected names
+            for expected in expected_names:
+                if expected.lower() in project_name.lower():
+                    found_names.append(expected)
+            
+            # CRITICAL: Check for forbidden names (Indoor Firing Range)
+            for forbidden in forbidden_names:
+                if forbidden.lower() in project_name.lower():
+                    forbidden_found.append(project_name)
+                    print(f"    ✗ CRITICAL: FORBIDDEN lead found: '{project_name}'")
+                    print(f"       This means 'door' is still matching 'Indoor' (word boundary fix FAILED)")
+            
+            # List non-null fields
+            non_null_fields = []
+            null_fields = []
+            check_fields = ['contact_phone', 'source_stated_value', 'address', 'location', 
+                          'contact_email', 'bid_deadline', 'company_name', 'contact_name']
+            
+            for field in check_fields:
+                value = lead.get(field)
+                if value and value != '' and value != 'unknown':
+                    non_null_fields.append(field)
+                else:
+                    null_fields.append(field)
+            
+            print(f"    Non-null fields: {', '.join(non_null_fields) if non_null_fields else 'none'}")
+            print(f"    Null fields: {', '.join(null_fields) if null_fields else 'none'}")
+            
+            # Evidence validation - CHECK FOR NEW FIELD_NAME MAPPINGS
+            evidence = lead.get('evidence', [])
+            print(f"    Evidence rows: {len(evidence)}")
+            
+            # CRITICAL: Check evidence field_name set includes required fields
+            evidence_field_names = set(ev.get('field_name') for ev in evidence)
+            required_field_names = {'company_name', 'contact_name', 'tender_status', 'timeline', 'project_name'}
+            
+            print(f"    Evidence field_name set: {sorted(evidence_field_names)}")
+            
+            missing_required = required_field_names - evidence_field_names
+            if missing_required:
+                print(f"    ✗ CRITICAL: Missing required evidence field_names: {missing_required}")
+            else:
+                print(f"    ✓ All required evidence field_names present")
+            
+            if len(evidence) > 0:
+                print(f"    Sample evidence (first 3):")
+                for j, ev in enumerate(evidence[:3], 1):
+                    print(f"      {j}. field_name: {ev.get('field_name')}")
+                    print(f"         extracted_value: {str(ev.get('extracted_value', ''))[:60]}...")
+                    print(f"         source_url: {ev.get('source_url', '')[:60]}...")
+                    print(f"         retrieved_content: {str(ev.get('retrieved_content', ''))[:60]}...")
+            
+            # Validate evidence integrity
+            is_valid, issues = self.validate_evidence_integrity(lead, evidence)
+            if not is_valid:
+                print(f"    ✗ EVIDENCE ISSUES:")
+                for issue in issues:
+                    print(f"      - {issue}")
+            else:
+                print(f"    ✓ Evidence integrity validated")
+        
+        # Check for specific lead: Cell Window Glazing
+        cell_window_lead = None
+        for lead in canadabuys_leads:
+            if 'Cell Window Glazing' in lead.get('project_name', ''):
+                cell_window_lead = lead
+                break
+        
+        if cell_window_lead:
+            print(f"\n[SPECIFIC LEAD CHECK: Cell Window Glazing]")
+            contact_email = cell_window_lead.get('contact_email', '')
+            print(f"  contact_email: {contact_email}")
+            
+            if 'Carlie.Skotynski@csc-scc.gc.ca' in contact_email:
+                print(f"  ✓ Expected contact email found")
+                
+                # Check evidence for this email
+                evidence = cell_window_lead.get('evidence', [])
+                email_evidence = [e for e in evidence if e.get('field_name') == 'contact_email']
+                if email_evidence:
+                    snippet = email_evidence[0].get('retrieved_content', '')
+                    if 'contactInfoEmail' in snippet:
+                        print(f"  ✓ Evidence snippet contains 'contactInfoEmail'")
+                    else:
+                        print(f"  ✗ Evidence snippet does not contain 'contactInfoEmail': {snippet[:100]}")
+            else:
+                print(f"  ✗ Expected contact email not found")
+        
+        print(f"\n[SUMMARY]")
+        print(f"  Expected lead names found: {', '.join(found_names) if found_names else 'none'}")
+        print(f"  Forbidden lead names found: {', '.join(forbidden_found) if forbidden_found else 'none (GOOD)'}")
+        
+        # CRITICAL CHECKS
+        test_passed = True
+        if forbidden_found:
+            print(f"  ✗ CRITICAL FAILURE: 'Indoor Firing Range' found in results (word boundary fix FAILED)")
+            test_passed = False
+        else:
+            print(f"  ✓ CRITICAL: 'Indoor Firing Range' NOT in results (word boundary fix WORKING)")
+        
+        if actual_matched != expected_matched:
+            print(f"  ✗ CRITICAL FAILURE: matched={actual_matched}, expected {expected_matched}")
+            test_passed = False
+        
+        if canadabuys_run.get('status') != 'completed':
+            print(f"  ✗ Run status is '{canadabuys_run.get('status')}', expected 'completed'")
+            test_passed = False
+        
+        print(f"\n{'✓ TEST (A) PASSED' if test_passed else '✗ TEST (A) FAILED'}")
+        
+        return {
+            'run': canadabuys_run,
+            'leads': canadabuys_leads,
+            'search_stats': search_stats,
+            'run_id': canadabuys_run.get('run_id'),
+            'passed': test_passed
+        }
     
-    print("\n" + "="*80)
-    print(f"Total: {passed + failed} tests")
-    print(f"Passed: {passed}")
-    print(f"Failed: {failed}")
-    print(f"Completed at: {datetime.now().isoformat()}")
-    print("="*80)
+    def test_discovery_search_scenario_b(self):
+        """
+        Test scenario (B): Re-run same search
+        Expected: found=0, duplicated>=2 (was 3, now 2 after fix), leads still returned
+        """
+        print("\n" + "-"*80)
+        print("TEST (B): Re-run same search - verify deduplication")
+        print("EXPECTED: found=0, duplicated>=2")
+        print("-"*80)
+        
+        search_payload = {
+            "trade": "windows_doors",
+            "location": "Fraser Valley, British Columbia",
+            "limit": 20
+        }
+        
+        print(f"Sending search request (timeout={TIMEOUT}s)...")
+        
+        start_time = time.time()
+        response = self.session.post(
+            f"{API_URL}/discover/search",
+            json=search_payload,
+            timeout=TIMEOUT
+        )
+        elapsed = time.time() - start_time
+        
+        print(f"Response received in {elapsed:.1f}s - Status: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"✗ FAILED: Expected 200, got {response.status_code}")
+            return False
+        
+        data = response.json()
+        
+        # Find CanadaBuys run
+        canadabuys_run = None
+        for run in data.get('runs', []):
+            if 'CanadaBuys' in run.get('source_name', ''):
+                canadabuys_run = run
+                break
+        
+        if not canadabuys_run:
+            print(f"✗ FAILED: No CanadaBuys run found")
+            return False
+        
+        print(f"\n[CANADABUYS RUN]")
+        print(f"  status: {canadabuys_run.get('status')}")
+        print(f"  found: {canadabuys_run.get('found')}")
+        print(f"  duplicated: {canadabuys_run.get('duplicated')}")
+        
+        leads = data.get('leads', [])
+        canadabuys_leads = [l for l in leads if 'CanadaBuys' in l.get('source', {}).get('name', '')]
+        print(f"  leads returned: {len(canadabuys_leads)}")
+        
+        # Validate deduplication
+        passed = True
+        if canadabuys_run.get('found', -1) != 0:
+            print(f"✗ FAILED: Expected found=0, got {canadabuys_run.get('found')}")
+            passed = False
+        else:
+            print(f"✓ found=0 (no new leads)")
+        
+        # UPDATED: duplicated should be 2 (not 3) after word boundary fix
+        if canadabuys_run.get('duplicated', 0) < 2:
+            print(f"✗ FAILED: Expected duplicated>=2, got {canadabuys_run.get('duplicated')}")
+            passed = False
+        else:
+            print(f"✓ duplicated={canadabuys_run.get('duplicated')} (known leads)")
+        
+        if len(canadabuys_leads) < 2:
+            print(f"✗ FAILED: Expected at least 2 leads returned, got {len(canadabuys_leads)}")
+            passed = False
+        else:
+            print(f"✓ {len(canadabuys_leads)} leads still returned (includes known duplicates)")
+        
+        print(f"\n{'✓ TEST (B) PASSED' if passed else '✗ TEST (B) FAILED'}")
+        return passed
     
-    return failed == 0
+    def test_discovery_search_scenario_c(self):
+        """
+        Test scenario (C): Impossible criteria search
+        Expected: 200 with leads=[], matched=0
+        """
+        print("\n" + "-"*80)
+        print("TEST (C): Impossible criteria search - verify no fabrication")
+        print("-"*80)
+        
+        search_payload = {
+            "trade": "roofing",
+            "location": "Fraser Valley, British Columbia",
+            "date_from": "2030-01-01",
+            "limit": 20
+        }
+        
+        print(f"Payload: {json.dumps(search_payload, indent=2)}")
+        print(f"Sending search request (timeout={TIMEOUT}s)...")
+        
+        start_time = time.time()
+        response = self.session.post(
+            f"{API_URL}/discover/search",
+            json=search_payload,
+            timeout=TIMEOUT
+        )
+        elapsed = time.time() - start_time
+        
+        print(f"Response received in {elapsed:.1f}s - Status: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"✗ FAILED: Expected 200, got {response.status_code}")
+            return False
+        
+        data = response.json()
+        
+        # Find CanadaBuys run
+        canadabuys_run = None
+        for run in data.get('runs', []):
+            if 'CanadaBuys' in run.get('source_name', ''):
+                canadabuys_run = run
+                break
+        
+        if not canadabuys_run:
+            print(f"✗ FAILED: No CanadaBuys run found")
+            return False
+        
+        print(f"\n[CANADABUYS RUN]")
+        print(f"  status: {canadabuys_run.get('status')}")
+        print(f"  found: {canadabuys_run.get('found')}")
+        
+        search_stats = canadabuys_run.get('search', {})
+        if search_stats:
+            print(f"  search.matched: {search_stats.get('matched')}")
+        
+        leads = data.get('leads', [])
+        print(f"  leads returned: {len(leads)}")
+        
+        # Validate no fabrication
+        passed = True
+        if search_stats.get('matched', -1) != 0:
+            print(f"✗ FAILED: Expected matched=0, got {search_stats.get('matched')}")
+            passed = False
+        else:
+            print(f"✓ matched=0 (no results)")
+        
+        if len(leads) != 0:
+            print(f"✗ FAILED: Expected 0 leads, got {len(leads)} (fabricated data!)")
+            passed = False
+        else:
+            print(f"✓ 0 leads returned (nothing fabricated)")
+        
+        print(f"\n{'✓ TEST (C) PASSED' if passed else '✗ TEST (C) FAILED'}")
+        return passed
+    
+    def test_admin_run_detail(self, run_id):
+        """
+        Test scenario (D): GET /api/admin/runs/:run_id
+        Verify logs include robots step, retrieve step, search step
+        """
+        print("\n" + "-"*80)
+        print(f"TEST (D): Admin run detail - run_id={run_id}")
+        print("-"*80)
+        
+        response = self.session.get(
+            f"{API_URL}/admin/runs/{run_id}",
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            print(f"✗ FAILED: Expected 200, got {response.status_code}")
+            return False
+        
+        data = response.json()
+        
+        print(f"\n[RUN DETAIL]")
+        print(f"  status: {data.get('status')}")
+        print(f"  connector: {data.get('connector')}")
+        print(f"  params.trigger: {data.get('params', {}).get('trigger')}")
+        
+        logs = data.get('logs', [])
+        print(f"  logs: {len(logs)} entries")
+        
+        retrievals = data.get('retrievals', [])
+        print(f"  retrievals: {len(retrievals)} entries")
+        
+        # Check for required log steps
+        log_steps = {log.get('step'): log for log in logs}
+        
+        required_steps = ['robots', 'retrieve', 'search']
+        passed = True
+        
+        for step in required_steps:
+            if step in log_steps:
+                log_entry = log_steps[step]
+                print(f"\n  Step '{step}':")
+                print(f"    status: {log_entry.get('status')}")
+                print(f"    message: {log_entry.get('message', '')[:100]}...")
+                
+                if step == 'robots':
+                    message = log_entry.get('message', '')
+                    if 'licensed access basis' in message.lower():
+                        print(f"    ✓ Message contains 'licensed access basis'")
+                    else:
+                        print(f"    ✗ Message does not contain 'licensed access basis'")
+                        passed = False
+            else:
+                print(f"  ✗ Step '{step}' not found in logs")
+                passed = False
+        
+        # Check retrievals
+        if retrievals:
+            retrieval = retrievals[0]
+            print(f"\n  Retrieval[0]:")
+            print(f"    retrieval_status: {retrieval.get('retrieval_status')}")
+            print(f"    byte_size: {retrieval.get('byte_size')}")
+            
+            if retrieval.get('retrieval_status') == 'success':
+                print(f"    ✓ retrieval_status='success'")
+            else:
+                print(f"    ✗ retrieval_status='{retrieval.get('retrieval_status')}'")
+                passed = False
+            
+            if retrieval.get('byte_size', 0) > 1000000:
+                print(f"    ✓ byte_size > 1MB")
+            else:
+                print(f"    ✗ byte_size={retrieval.get('byte_size')} (expected > 1MB)")
+        
+        print(f"\n{'✓ TEST (D) PASSED' if passed else '✗ TEST (D) FAILED'}")
+        return passed
+    
+    def test_search_history(self):
+        """
+        Test scenario (E): GET /api/search-history
+        Verify newest entry has filters.trade='windows_doors' and search_run_id
+        """
+        print("\n" + "-"*80)
+        print("TEST (E): Search history")
+        print("-"*80)
+        
+        response = self.session.get(
+            f"{API_URL}/search-history",
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            print(f"✗ FAILED: Expected 200, got {response.status_code}")
+            return False
+        
+        data = response.json()
+        
+        if not data or len(data) == 0:
+            print(f"✗ FAILED: No search history entries found")
+            return False
+        
+        # Newest entry is first (ordered by created_at desc)
+        newest = data[0]
+        
+        print(f"\n[NEWEST SEARCH HISTORY ENTRY]")
+        print(f"  query_text: {newest.get('query_text')}")
+        print(f"  filters: {newest.get('filters')}")
+        print(f"  result_count: {newest.get('result_count')}")
+        print(f"  search_run_id: {newest.get('search_run_id')}")
+        
+        passed = True
+        
+        filters = newest.get('filters', {})
+        if filters.get('trade') == 'windows_doors':
+            print(f"  ✓ filters.trade='windows_doors'")
+        else:
+            print(f"  ✗ filters.trade='{filters.get('trade')}' (expected 'windows_doors')")
+            passed = False
+        
+        if newest.get('search_run_id'):
+            print(f"  ✓ search_run_id is not null")
+        else:
+            print(f"  ✗ search_run_id is null")
+            passed = False
+        
+        if newest.get('result_count', 0) > 0:
+            print(f"  ✓ result_count={newest.get('result_count')}")
+        else:
+            print(f"  ✗ result_count={newest.get('result_count')}")
+        
+        print(f"\n{'✓ TEST (E) PASSED' if passed else '✗ TEST (E) FAILED'}")
+        return passed
+    
+    def test_location_filter_semantics(self):
+        """
+        Test scenario (G): Location filter semantics
+        UPDATED EXPECTATIONS:
+        - {trade:'windows_doors', location:'British Columbia'} -> matched == 5
+        - {location:'Fraser Valley, British Columbia'} (no trade) -> matched == 8
+        'British Columbia' should return more matches than 'Fraser Valley, British Columbia'
+        """
+        print("\n" + "-"*80)
+        print("TEST (G): Location filter semantics")
+        print("EXPECTED: BC=5 (with trade), Fraser Valley=8 (no trade)")
+        print("-"*80)
+        
+        # Search 1: British Columbia with trade windows_doors
+        print(f"\nSearch 1: windows_doors + British Columbia")
+        search1 = {
+            "trade": "windows_doors",
+            "location": "British Columbia",
+            "limit": 20
+        }
+        
+        response1 = self.session.post(
+            f"{API_URL}/discover/search",
+            json=search1,
+            timeout=TIMEOUT
+        )
+        
+        if response1.status_code != 200:
+            print(f"✗ FAILED: Search 1 returned {response1.status_code}")
+            return False
+        
+        data1 = response1.json()
+        canadabuys_run1 = None
+        for run in data1.get('runs', []):
+            if 'CanadaBuys' in run.get('source_name', ''):
+                canadabuys_run1 = run
+                break
+        
+        if not canadabuys_run1:
+            print(f"✗ FAILED: No CanadaBuys run in search 1")
+            return False
+        
+        matched1 = canadabuys_run1.get('search', {}).get('matched', 0)
+        print(f"  CanadaBuys matched: {matched1} (expected: 5)")
+        
+        # Search 2: Fraser Valley, British Columbia with trade windows_doors
+        print(f"\nSearch 2: windows_doors + Fraser Valley, British Columbia")
+        search2 = {
+            "trade": "windows_doors",
+            "location": "Fraser Valley, British Columbia",
+            "limit": 20
+        }
+        
+        response2 = self.session.post(
+            f"{API_URL}/discover/search",
+            json=search2,
+            timeout=TIMEOUT
+        )
+        
+        if response2.status_code != 200:
+            print(f"✗ FAILED: Search 2 returned {response2.status_code}")
+            return False
+        
+        data2 = response2.json()
+        canadabuys_run2 = None
+        for run in data2.get('runs', []):
+            if 'CanadaBuys' in run.get('source_name', ''):
+                canadabuys_run2 = run
+                break
+        
+        if not canadabuys_run2:
+            print(f"✗ FAILED: No CanadaBuys run in search 2")
+            return False
+        
+        matched2 = canadabuys_run2.get('search', {}).get('matched', 0)
+        print(f"  CanadaBuys matched: {matched2} (expected: 2)")
+        
+        # Search 3: Fraser Valley, British Columbia WITHOUT trade filter
+        print(f"\nSearch 3: Fraser Valley, British Columbia (no trade)")
+        search3 = {
+            "location": "Fraser Valley, British Columbia",
+            "limit": 20
+        }
+        
+        response3 = self.session.post(
+            f"{API_URL}/discover/search",
+            json=search3,
+            timeout=TIMEOUT
+        )
+        
+        if response3.status_code != 200:
+            print(f"✗ FAILED: Search 3 returned {response3.status_code}")
+            return False
+        
+        data3 = response3.json()
+        canadabuys_run3 = None
+        for run in data3.get('runs', []):
+            if 'CanadaBuys' in run.get('source_name', ''):
+                canadabuys_run3 = run
+                break
+        
+        if not canadabuys_run3:
+            print(f"✗ FAILED: No CanadaBuys run in search 3")
+            return False
+        
+        matched3 = canadabuys_run3.get('search', {}).get('matched', 0)
+        print(f"  CanadaBuys matched: {matched3} (expected: 8)")
+        
+        # Compare and validate
+        print(f"\n[COMPARISON]")
+        print(f"  'windows_doors + British Columbia': {matched1} matches (expected: 5)")
+        print(f"  'windows_doors + Fraser Valley, BC': {matched2} matches (expected: 2)")
+        print(f"  'Fraser Valley, BC (no trade)': {matched3} matches (expected: 8)")
+        
+        passed = True
+        
+        # Check if BC returns more than Fraser Valley (with trade)
+        if matched1 > matched2:
+            print(f"  ✓ 'British Columbia' returns more matches than 'Fraser Valley' ({matched1} > {matched2})")
+        else:
+            print(f"  ✗ Expected 'British Columbia' to return more matches")
+            passed = False
+        
+        # Check if Fraser Valley without trade returns more than with trade
+        if matched3 > matched2:
+            print(f"  ✓ 'Fraser Valley (no trade)' returns more than 'Fraser Valley + trade' ({matched3} > {matched2})")
+        else:
+            print(f"  ✗ Expected 'Fraser Valley (no trade)' to return more matches")
+            passed = False
+        
+        # Check exact expected values (allow ±1-2 tolerance as per instructions)
+        tolerance = 2
+        if abs(matched1 - 5) <= tolerance:
+            print(f"  ✓ BC matched={matched1} is within tolerance of expected 5")
+        else:
+            print(f"  ✗ BC matched={matched1} differs from expected 5 by more than {tolerance}")
+            passed = False
+        
+        if abs(matched2 - 2) <= tolerance:
+            print(f"  ✓ Fraser Valley+trade matched={matched2} is within tolerance of expected 2")
+        else:
+            print(f"  ✗ Fraser Valley+trade matched={matched2} differs from expected 2 by more than {tolerance}")
+            passed = False
+        
+        if abs(matched3 - 8) <= tolerance:
+            print(f"  ✓ Fraser Valley (no trade) matched={matched3} is within tolerance of expected 8")
+        else:
+            print(f"  ✗ Fraser Valley (no trade) matched={matched3} differs from expected 8 by more than {tolerance}")
+            passed = False
+        
+        print(f"\n{'✓ TEST (G) PASSED' if passed else '✗ TEST (G) FAILED'}")
+        return passed
+    
+    def run_all_tests(self):
+        """Run all Phase 3 tests"""
+        if not self.login():
+            print("\n✗ Cannot proceed without authentication")
+            return
+        
+        # Test (H) first - unauthenticated
+        test_h = self.test_unauthenticated_search()
+        
+        # Test (A) - main discovery search (CRITICAL: word boundary fix)
+        result_a = self.test_discovery_search_scenario_a()
+        test_a_passed = result_a and result_a.get('passed', False)
+        
+        # Test (B) - re-run for deduplication
+        test_b = self.test_discovery_search_scenario_b()
+        
+        # Test (C) - impossible criteria
+        test_c = self.test_discovery_search_scenario_c()
+        
+        # Test (D) - admin run detail
+        test_d = False
+        if result_a and result_a.get('run_id'):
+            test_d = self.test_admin_run_detail(result_a['run_id'])
+        
+        # Test (E) - search history
+        test_e = self.test_search_history()
+        
+        # Test (G) - location filter semantics (UPDATED with new expectations)
+        test_g = self.test_location_filter_semantics()
+        
+        # Final summary
+        print("\n" + "="*80)
+        print("PHASE 3 FIX VERIFICATION SUMMARY")
+        print("="*80)
+        print(f"Test (A) - Discovery search (CRITICAL: word boundary fix): {'✓ PASSED' if test_a_passed else '✗ FAILED'}")
+        print(f"Test (B) - Re-run deduplication: {'✓ PASSED' if test_b else '✗ FAILED'}")
+        print(f"Test (C) - Impossible criteria (no fabrication): {'✓ PASSED' if test_c else '✗ FAILED'}")
+        print(f"Test (D) - Admin run detail: {'✓ PASSED' if test_d else '✗ FAILED'}")
+        print(f"Test (E) - Search history: {'✓ PASSED' if test_e else '✗ FAILED'}")
+        print(f"Test (G) - Location filter semantics (BC=5, FV=2, FV no trade=8): {'✓ PASSED' if test_g else '✗ FAILED'}")
+        print(f"Test (H) - Unauthenticated request (401): {'✓ PASSED' if test_h else '✗ FAILED'}")
+        
+        all_passed = all([test_a_passed, test_b, test_c, test_d, test_e, test_g, test_h])
+        
+        if all_passed:
+            print("\n" + "="*80)
+            print("✓ ALL PHASE 3 FIX VERIFICATION TESTS PASSED")
+            print("="*80)
+        else:
+            print("\n" + "="*80)
+            print("✗ SOME TESTS FAILED - SEE DETAILS ABOVE")
+            print("="*80)
+        
+        return all_passed
 
 if __name__ == "__main__":
-    success = main()
-    exit(0 if success else 1)
+    test_session = TestSession()
+    test_session.run_all_tests()

@@ -1,5 +1,6 @@
 import crypto from 'crypto'
 import { XMLParser } from 'fast-xml-parser'
+import { detectTradeIn } from './query'
 
 // ---------------------------------------------------------------- utilities
 export const sha256 = (s) => crypto.createHash('sha256').update(s || '').digest('hex')
@@ -67,25 +68,9 @@ function parseSource(content, sourceUrl) {
 }
 
 // -------------------------------------------------- deterministic extractors
-const TRADE_KEYWORDS = {
-  windows_doors: ['window', 'door', 'glazing', 'fenestration'],
-  siding: ['siding', 'cladding'],
-  roofing: ['roof', 'roofing', 'shingle', 'membrane'],
-  renovations: ['renovation', 'remodel', 'refurbish', 'retrofit'],
-  building_envelope: ['envelope', 'waterproofing', 'insulation', 'facade', 'faade'],
-  hvac: ['hvac', 'heating', 'ventilation', 'air conditioning', 'mechanical'],
-  electrical: ['electrical', 'wiring', 'lighting', 'switchgear', 'power distribution'],
-  plumbing: ['plumbing', 'piping', 'water main', 'sewer', 'drainage'],
-  concrete: ['concrete', 'paving', 'foundation', 'masonry', 'sidewalk'],
-  landscaping: ['landscap', 'irrigation', 'grading', 'planting', 'streetscape'],
-}
 function detectTrade(text) {
-  const t = (text || '').toLowerCase()
-  for (const [trade, kws] of Object.entries(TRADE_KEYWORDS)) {
-    const hit = kws.find((k) => t.includes(k))
-    if (hit) return { trade, snippet: snippetAround(text, hit) }
-  }
-  return null
+  const r = detectTradeIn(text)
+  return r ? { trade: r.trade, snippet: snippetAround(text, r.hit) } : null
 }
 function snippetAround(text, needle) {
   const t = String(text || ''); const i = t.toLowerCase().indexOf(String(needle).toLowerCase())
