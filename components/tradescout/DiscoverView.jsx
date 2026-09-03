@@ -25,6 +25,22 @@ export default function DiscoverView({ onOpenLead }) {
   const [saving, setSaving] = useState(false)
   const [results, setResults] = useState(null) // { query, runs, totals, leads }
   const [openRow, setOpenRow] = useState(null)
+  const [sort, setSort] = useState('score_desc')
+  const [catFilter, setCatFilter] = useState(ANY)
+
+  const displayLeads = (() => {
+    if (!leads) return leads
+    let out = leads
+    if (catFilter !== ANY) out = out.filter((l) => (l.score_category || scoreCategoryOf(l.lead_score)) === catFilter)
+    const s = (l) => (l.lead_score == null ? -1 : l.lead_score)
+    out = [...out].sort((a, b) => {
+      if (sort === 'score_desc') return s(b) - s(a)
+      if (sort === 'score_asc') return s(a) - s(b)
+      if (sort === 'recent') return new Date(b.created_at || 0) - new Date(a.created_at || 0)
+      return 0
+    })
+    return out
+  })()
 
   const buildQuery = useCallback(() => {
     const p = new URLSearchParams()
@@ -196,18 +212,38 @@ export default function DiscoverView({ onOpenLead }) {
 
       <DemoBanner />
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-medium text-muted-foreground">Available leads in your workspace</h2>
-        <div className="flex gap-1">
-          <Button size="icon" variant={view === 'table' ? 'default' : 'outline'} onClick={() => setView('table')} className="h-8 w-8"><List className="h-4 w-4" /></Button>
-          <Button size="icon" variant={view === 'cards' ? 'default' : 'outline'} onClick={() => setView('cards')} className="h-8 w-8"><LayoutGrid className="h-4 w-4" /></Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Select value={catFilter} onValueChange={setCatFilter}>
+            <SelectTrigger className="h-8 w-[170px]" data-testid="score-filter"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ANY}>All opportunities</SelectItem>
+              <SelectItem value="high">{SCORE_CATEGORY_LABELS.high}</SelectItem>
+              <SelectItem value="good">{SCORE_CATEGORY_LABELS.good}</SelectItem>
+              <SelectItem value="moderate">{SCORE_CATEGORY_LABELS.moderate}</SelectItem>
+              <SelectItem value="low">{SCORE_CATEGORY_LABELS.low}</SelectItem>
+            </SelectContent>
+          </Select>
+          <Select value={sort} onValueChange={setSort}>
+            <SelectTrigger className="h-8 w-[170px]" data-testid="score-sort"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="score_desc">Highest score first</SelectItem>
+              <SelectItem value="score_asc">Lowest score first</SelectItem>
+              <SelectItem value="recent">Most recent</SelectItem>
+            </SelectContent>
+          </Select>
+          <div className="flex gap-1">
+            <Button size="icon" variant={view === 'table' ? 'default' : 'outline'} onClick={() => setView('table')} className="h-8 w-8"><List className="h-4 w-4" /></Button>
+            <Button size="icon" variant={view === 'cards' ? 'default' : 'outline'} onClick={() => setView('cards')} className="h-8 w-8"><LayoutGrid className="h-4 w-4" /></Button>
+          </div>
         </div>
       </div>
 
       {!leads && <div className="space-y-2">{[0, 1, 2].map((i) => <Skeleton key={i} className="h-16 w-full" />)}</div>}
-      {leads && leads.length === 0 && <Card><CardContent className="py-12 text-center text-muted-foreground">No leads match your filters.</CardContent></Card>}
+      {leads && displayLeads.length === 0 && <Card><CardContent className="py-12 text-center text-muted-foreground">No leads match your filters.</CardContent></Card>}
 
-      {leads && leads.length > 0 && view === 'table' && (
+      {leads && displayLeads.length > 0 && view === 'table' && (
         <Card><CardContent className="p-0">
           <Table>
             <TableHeader><TableRow>
@@ -215,7 +251,7 @@ export default function DiscoverView({ onOpenLead }) {
               <TableHead>Est. trade value</TableHead><TableHead>Score</TableHead><TableHead>Status</TableHead><TableHead></TableHead>
             </TableRow></TableHeader>
             <TableBody>
-              {leads.map((l) => (
+              {displayLeads.map((l) => (
                 <TableRow key={l.id} className="cursor-pointer" onClick={() => onOpenLead(l.id)}>
                   <TableCell className="font-medium"><div className="flex items-center gap-2">{l.project_name || 'Untitled'}{l.is_demo && <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-700">DEMO</Badge>}</div></TableCell>
                   <TableCell>{tradeLabel(l.trade_category) || '—'}</TableCell>
@@ -238,9 +274,9 @@ export default function DiscoverView({ onOpenLead }) {
         </CardContent></Card>
       )}
 
-      {leads && leads.length > 0 && view === 'cards' && (
+      {leads && displayLeads.length > 0 && view === 'cards' && (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {leads.map((l) => (
+          {displayLeads.map((l) => (
             <Card key={l.id} className="cursor-pointer hover:border-amber-300 transition" onClick={() => onOpenLead(l.id)}>
               <CardContent className="pt-6 space-y-3">
                 <div className="flex items-start justify-between gap-2">
@@ -249,6 +285,9 @@ export default function DiscoverView({ onOpenLead }) {
                 </div>
                 <div><h3 className="font-medium leading-tight">{l.project_name || 'Untitled project'}</h3>
                   <p className="text-xs text-muted-foreground mt-1">{l.location || 'Location N/A'} · {l.project_type || '—'}</p></div>
+                {l.lead_score != null && (() => { const c = l.score_category || scoreCategoryOf(l.lead_score); return (
+                  <div className="flex items-center gap-2"><span className="text-sm font-semibold tabular-nums">{l.lead_score}/100</span>{c && <Badge variant="outline" className={`text-[10px] ${SCORE_CATEGORY_STYLES[c]}`}>{SCORE_CATEGORY_LABELS[c]}</Badge>}</div>
+                ) })()}
                 <div className="flex items-center justify-between pt-2 border-t">
                   <div><p className="text-sm font-semibold">{money(l.estimated_trade_value, l.estimated_trade_value_currency) || '—'}</p><p className="text-[10px] text-muted-foreground">est. trade value</p></div>
                   <Badge variant="outline" className={VERIFICATION_STYLES[l.verification_status]}>{l.verification_status.replace('_', ' ')}</Badge>

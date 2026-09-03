@@ -8,9 +8,12 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Progress } from '@/components/ui/progress'
-import { tradeLabel, money, TRADES } from '@/lib/tradescout/constants'
-import { Layers, Bookmark, TrendingUp, Sparkles, ArrowRight, CheckCircle2, Circle } from 'lucide-react'
+import { tradeLabel, money, TRADES, SCORE_CATEGORY_LABELS, scoreCategoryOf } from '@/lib/tradescout/constants'
+import { Layers, Bookmark, TrendingUp, Sparkles, ArrowRight, CheckCircle2, Circle, Gauge } from 'lucide-react'
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, Cell } from 'recharts'
+
+const SCORE_CAT_ORDER = ['high', 'good', 'moderate', 'low']
+const SCORE_CAT_COLOR = { high: '#10b981', good: '#3b82f6', moderate: '#f59e0b', low: '#94a3b8' }
 
 const STAT_CARDS = [
   { key: 'available_leads', label: 'Available Leads', icon: Layers, color: 'text-blue-600 bg-blue-50' },
@@ -35,6 +38,14 @@ export default function DashboardView({ profile, onNavigate, onOpenLead }) {
 
   const breakdown = TRADES.map((t) => ({ name: t.label, value: allLeads.filter((l) => l.trade_category === t.value).length }))
     .filter((d) => d.value > 0).sort((a, b) => b.value - a.value)
+
+  const scoreCounts = allLeads.reduce((acc, l) => {
+    const c = l.score_category || scoreCategoryOf(l.lead_score)
+    if (c) acc[c] = (acc[c] || 0) + 1
+    return acc
+  }, {})
+  const scoreBreakdown = SCORE_CAT_ORDER.map((c) => ({ key: c, name: SCORE_CATEGORY_LABELS[c], value: scoreCounts[c] || 0, color: SCORE_CAT_COLOR[c] }))
+  const scoreTotal = scoreBreakdown.reduce((a, d) => a + d.value, 0)
 
   const onboarding = [
     { done: (profile?.trade_focus?.length || 0) > 0, label: 'Set your trade focus', action: () => onNavigate('settings') },
@@ -87,6 +98,43 @@ export default function DashboardView({ profile, onNavigate, onOpenLead }) {
           </CardContent>
         </Card>
       )}
+
+      <Card data-testid="opportunity-breakdown">
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="text-base flex items-center gap-2"><Gauge className="h-4 w-4" /> Opportunity score breakdown</CardTitle>
+          <button onClick={() => onNavigate('discover')} className="text-xs text-muted-foreground hover:text-foreground">View leads</button>
+        </CardHeader>
+        <CardContent>
+          {!leads && <Skeleton className="h-40 w-full" />}
+          {leads && scoreTotal === 0 && <p className="text-sm text-muted-foreground py-12 text-center">No scored leads yet.</p>}
+          {leads && scoreTotal > 0 && (
+            <div className="grid gap-6 sm:grid-cols-5 items-center">
+              <div className="sm:col-span-3">
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={scoreBreakdown} layout="vertical" margin={{ left: 10, right: 24 }}>
+                    <XAxis type="number" allowDecimals={false} hide />
+                    <YAxis type="category" dataKey="name" width={150} tick={{ fontSize: 12 }} axisLine={false} tickLine={false} />
+                    <Tooltip cursor={{ fill: '#f8fafc' }} formatter={(v) => [`${v} lead${v === 1 ? '' : 's'}`, 'Count']} />
+                    <Bar dataKey="value" radius={[0, 4, 4, 0]} label={{ position: 'right', fontSize: 12 }}>
+                      {scoreBreakdown.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="sm:col-span-2 space-y-2">
+                {scoreBreakdown.map((d) => (
+                  <div key={d.key} className="flex items-center justify-between rounded-md border p-2.5">
+                    <span className="flex items-center gap-2 text-sm">
+                      <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: d.color }} />{d.name}
+                    </span>
+                    <span className="text-sm font-semibold tabular-nums">{d.value}<span className="text-muted-foreground font-normal"> · {Math.round((d.value / scoreTotal) * 100)}%</span></span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-6 lg:grid-cols-2">
         <Card>
