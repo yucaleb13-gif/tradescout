@@ -20,7 +20,11 @@ Pipeline: SOURCE → ROBOTS → RETRIEVE → EXTRACT → (DETAIL) → EVIDENCE �
   - `POST /api/discover/search` runs up to 4 active sources (trust-ordered, skipping known robots-blocked), returns leads + evidence (new + already-known duplicates), writes search_history with run link. Discover UI shows Project / Source / URL / Fields / Evidence / Verification with expandable evidence panel and explicit zero-result message.
   - Verification states now: verified / unverified / rejected (needs_review no longer produced).
   - Canonical test (Windows & Doors, Fraser Valley BC): 978 rows retrieved, 36 trade hits, 2 matched, 2 verified, 0 rejected, 0 fabricated. Missing most often: source-stated value (dataset never publishes), address (not mapped by design), contact phone (~50%).
-- Phase 4+ — awaiting user prompt.
+- Phase 4 (source-grounded AI processing) — DONE, backend + UI tested:
+  - `app/lib/ai/grounded.js` via `emergentintegrations` (Emergent LLM key, provider openai, model `gpt-4o-mini`, env `EMERGENT_LLM_KEY`, `EMERGENT_MODEL`). Input = ONLY lead fields + evidence snippets + source URL. Output JSON validated deterministically: numbers/money in summary must exist in source text (unit-normalised), no contact details, no speculative phrasing, enum-checked classifications must cite real evidence ids (confident-without-evidence = invalid). One corrective retry, sequential calls with backoff (proxy has a concurrency limit), transient failures retried by scheduler.
+  - Stored ONLY in `leads.ai_summary / ai_classification (schema tradescout.ai.v1: input_snapshot, evidence refs, trade/project-type classification, relevance fit, evidence groups, unknowns, model, timestamps, validator notes) / ai_model / ai_generated_at`. Factual columns never touched; failures recorded (`status: failed`) with lead intact; `pipeline_logs` step `ai`.
+  - Endpoints: `POST /api/ai/leads/:id`, `POST /api/ai/process-pending`; auto-run (20 s budget) after `discover/search`; scheduler catch-up (5/min). UI: AI analysis card on lead detail (Generate/Regenerate, failed state), AI summary block in Discover results. Demo/rejected leads skipped.
+- Phase 5+ — awaiting user prompt.
 
 ## Environment notes
 - Next dev server runs with a 512 MB heap cap and a memory watchdog that occasionally restarts the worker (brief ECONNREFUSED); production build would not have this.

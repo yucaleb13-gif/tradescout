@@ -3,6 +3,7 @@
 // - ensureScheduler() starts an in-process ticker (dev/long-lived server) that checks every minute.
 import { admin } from '@/app/lib/supabase/admin'
 import { runPipeline } from '@/app/lib/pipeline/engine'
+import { processLeadsAi, listPendingAiLeads } from '@/app/lib/ai/grounded'
 
 const TICK_MS = 60 * 1000
 const MAX_PER_TICK = 5
@@ -42,7 +43,12 @@ export async function runDueSources({ limit = MAX_PER_TICK, trigger = 'scheduler
 export function ensureScheduler() {
   if (globalThis.__tradescoutScheduler) return
   globalThis.__tradescoutScheduler = setInterval(() => {
-    runDueSources().catch(() => {})
+    runDueSources()
+      .then(async () => { // Phase 4: catch up on leads that still lack a source-grounded AI summary
+        const ids = await listPendingAiLeads(5)
+        if (ids.length) await processLeadsAi(ids, { concurrency: 1, budgetMs: 45000, trigger: 'scheduler' })
+      })
+      .catch(() => {})
   }, TICK_MS)
   // do not keep the process alive solely for the timer
   if (typeof globalThis.__tradescoutScheduler.unref === 'function') globalThis.__tradescoutScheduler.unref()

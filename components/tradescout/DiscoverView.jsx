@@ -156,6 +156,12 @@ export default function DiscoverView({ onOpenLead }) {
                                     <div key={k} className="grid grid-cols-[130px_1fr] gap-2"><dt className="text-muted-foreground">{FIELD_LABELS[k]}</dt><dd className="italic text-slate-400">Not available in source</dd></div>
                                   ))}
                                 </dl>
+                                {l.ai_summary && l.ai_classification?.status === 'ok' && (
+                                  <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50/50 p-3" data-testid="result-ai-summary">
+                                    <p className="text-xs font-semibold uppercase text-violet-700 mb-1">AI summary · source-grounded{l.ai_classification.relevance?.fit ? ` · ${l.ai_classification.relevance.fit.replace('_', ' ')} fit` : ''}</p>
+                                    <p className="text-sm">{l.ai_summary}</p>
+                                  </div>
+                                )}
                                 {l.project_description && <div className="mt-3"><p className="text-xs font-semibold uppercase text-muted-foreground mb-1">Description</p><p className="text-sm whitespace-pre-line line-clamp-6">{l.project_description}</p></div>}
                                 <div className="mt-3 flex gap-2">
                                   <Button size="sm" variant="outline" onClick={() => onOpenLead(l.id)}>Open lead</Button>

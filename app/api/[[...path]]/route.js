@@ -5,6 +5,7 @@ import { runPipeline } from '@/app/lib/pipeline/engine'
 import { listConnectors } from '@/app/lib/connectors/registry'
 import { runDueSources, listDueSources, ensureScheduler } from '@/app/lib/pipeline/scheduler'
 import { purgeSource, purgeRun } from '@/app/lib/pipeline/purge'
+import { processLeadAi, processLeadsAi, listPendingAiLeads } from '@/app/lib/ai/grounded'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -21,7 +22,8 @@ async function getUserId(supabase) {
 
 // ------------------------------------------------------------------ POST
 export async function POST(request, context) {
-  const path = (await context.params)?.path?.join('/') || ''
+  const parts = (await context.params)?.path || []
+  const path = parts.join('/')
   const body = await request.json().catch(() => ({}))
   const supabase = await createClient()
 
@@ -171,13 +173,40 @@ export async function POST(request, context) {
       leads = (rows || []).map((l) => ({ ...l, evidence: byLead[l.id] || [] })).sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id))
     }
     const totals = runs.reduce((a, r) => ({ found: a.found + (r.found || 0), verified: a.verified + (r.verified || 0), rejected: a.rejected + (r.rejected || 0), duplicated: a.duplicated + (r.duplicated || 0) }), { found: 0, verified: 0, rejected: 0, duplicated: 0 })
+    // Phase 4: source-grounded AI processing for leads that have none yet (bounded time; leads exist without it)
+    const needAi = leads.filter((l) => !l.ai_generated_at && !(l.ai_classification && l.ai_classification.status === 'failed')).map((l) => l.id)
+    let ai = { processed: 0, pending: needAi.length, results: [] }
+    if (needAi.length && body.ai !== false) {
+      ai = await processLeadsAi(needAi, { concurrency: 1, budgetMs: 20000, trigger: 'search' })
+      const done = new Set(ai.results.filter((r) => r.status === 'ok').map((r) => r.lead_id))
+      if (done.size) {
+        const { data: fresh } = await admin.from('leads').select('id, ai_summary, ai_classification, ai_model, ai_generated_at').in('id', [...done])
+        const byId = Object.fromEntries((fresh || []).map((f) => [f.id, f]))
+        leads = leads.map((l) => byId[l.id] ? { ...l, ...byId[l.id] } : l)
+      }
+    }
     // record in the user's search history, linked to the first run
     const parts = [query.trade, query.location, query.project_type].filter(Boolean)
     await supabase.from('search_history').insert({
       profile_id: userId, query_text: parts.join(' · ') || 'All opportunities', filters: query,
       result_count: leads.length, search_run_id: runs[0]?.run_id || null,
     })
-    return json({ query, runs, totals, leads })
+    return json({ query, runs, totals, leads, ai })
+  }
+
+  // -------- PHASE 4: source-grounded AI processing (never writes factual columns)
+  if (parts[0] === 'ai' && parts[1] === 'leads' && parts[2]) {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    try { return json(await processLeadAi(parts[2], { force: body.force !== false, trigger: 'manual' })) }
+    catch (e) { return json({ error: e.message }, /not found/i.test(e.message) ? 404 : 400) }
+  }
+  if (path === 'ai/process-pending') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    const ids = await listPendingAiLeads(Math.min(20, Number(body.limit) || 10))
+    if (!ids.length) return json({ processed: 0, pending: 0, results: [] })
+    return json(await processLeadsAi(ids, { concurrency: 1, budgetMs: 45000, trigger: 'manual_pending' }))
   }
 
   // -------- RUN PIPELINE (SOURCE -> RETRIEVE -> ... -> LEAD)
