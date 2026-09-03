@@ -12,7 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { TRADES, PROJECT_TYPES, RADIUS_OPTIONS, tradeLabel, money, VERIFICATION_STYLES } from '@/lib/tradescout/constants'
+import { TRADES, PROJECT_TYPES, RADIUS_OPTIONS, tradeLabel, money, VERIFICATION_STYLES, SCORE_CATEGORY_STYLES, SCORE_CATEGORY_LABELS, scoreCategoryOf } from '@/lib/tradescout/constants'
 import { Search, Radar, LayoutGrid, List, Bookmark, Satellite, Loader2, ExternalLink, ChevronDown, ChevronUp, ShieldCheck, FileText } from 'lucide-react'
 import { toast } from 'sonner'
 
@@ -221,7 +221,14 @@ export default function DiscoverView({ onOpenLead }) {
                   <TableCell>{tradeLabel(l.trade_category) || '—'}</TableCell>
                   <TableCell>{l.location || '—'}</TableCell>
                   <TableCell>{money(l.estimated_trade_value, l.estimated_trade_value_currency) || '—'}</TableCell>
-                  <TableCell>{l.lead_score ?? '—'}</TableCell>
+                  <TableCell>
+                    {l.lead_score == null ? '—' : (
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold tabular-nums">{l.lead_score}</span>
+                        {(() => { const c = l.score_category || scoreCategoryOf(l.lead_score); return c ? <Badge variant="outline" className={`text-[10px] ${SCORE_CATEGORY_STYLES[c]}`}>{SCORE_CATEGORY_LABELS[c]}</Badge> : null })()}
+                      </div>
+                    )}
+                  </TableCell>
                   <TableCell><Badge variant="outline" className={VERIFICATION_STYLES[l.verification_status]}>{l.verification_status.replace('_', ' ')}</Badge></TableCell>
                   <TableCell onClick={(e) => e.stopPropagation()}><Button size="sm" variant="ghost" onClick={() => save(l.id)}><Bookmark className="h-4 w-4" /></Button></TableCell>
                 </TableRow>

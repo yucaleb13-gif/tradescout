@@ -37,3 +37,12 @@ Pipeline: SOURCE → ROBOTS → RETRIEVE → EXTRACT → (DETAIL) → EVIDENCE �
 ## Known minor
 - Console warning: `<div>` nested in `<p>` somewhere in UI (cosmetic).
 - `/app/app/api/[[...path]]/route.js` monolith (~430 lines) — split into per-resource route files when Phase 3 grows it.
+
+## Phase 5 — Deterministic Opportunity Scoring (done)
+- 0–100 score, deterministic & explainable, NEVER AI-assigned. Model config in `app/lib/scoring/score.js` (version `tradescout.score.v1`, data-driven so weights/factors can change without touching the lead pipeline).
+- Factors (points awarded only when verifiable from stored fields/evidence, else 0 — never inferred): +25 active tender (`tender_status` open/closing_soon), +20 strong trade match (trade_category + trade evidence), +15 public contact (email or phone), +15 recently published (`published_at` within 30 days), +10 project size (`source_stated_value`), +10 timeline/deadline, +5 reliable source (trust ≥ 70). Normalized to 100.
+- Categories: 80–100 High · 60–79 Good · 40–59 Moderate · 0–39 Low.
+- Stored on `leads`: `lead_score`, `score_category`, `scored_at`, `score_factors` (jsonb breakdown), plus new `published_at`. Scored at ingestion (engine.js). `POST /api/admin/rescore` re-scores all/by source/by lead. Compute-on-read fallback in the leads APIs.
+- Lead detail UI shows "Opportunity Score: XX/100" + category badge + full "Why this opportunity received this score" factor breakdown. Discover table shows score + category badge.
+- Backend tested: all 8 scenarios passed (determinism, data-integrity, no-factor-without-data, auth).
+

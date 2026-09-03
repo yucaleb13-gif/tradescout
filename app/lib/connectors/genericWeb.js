@@ -95,6 +95,7 @@ function moneyToNumber(raw) {
 }
 function matchEmail(text) { const m = String(text || '').match(EMAIL_RE); return m ? m[0] : null }
 function matchPhone(text) { const m = String(text || '').match(PHONE_RE); return m ? clean(m[0]) : null }
+const toIsoDate = (v) => { if (!v) return null; const d = new Date(v); return isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10) }
 function matchDeadline(text) {
   const t = String(text || '')
   if (!/(deadline|closing|close date|closes|due date|submission|bid due|tender clos)/i.test(t)) return null
@@ -153,6 +154,7 @@ export const genericWebConnector = {
     const dl = matchDeadline(hay); if (dl) add('bid_deadline', dl.iso, dl.snippet)
     const email = matchEmail(hay); if (email) add('contact_email', email, email)
     const phone = matchPhone(hay); if (phone) add('contact_phone', phone, phone)
+    const pub = toIsoDate(item.pubDate); if (pub) fields.published_at = pub
     return { fields, evidence, source_url: url }
   },
 
@@ -201,6 +203,7 @@ export const genericWebConnector = {
     if (f.contact_email) out.contact_email = f.contact_email
     if (f.contact_phone) out.contact_phone = f.contact_phone
     if (f.bid_deadline) out.bid_deadline = f.bid_deadline
+    if (f.published_at) out.published_at = f.published_at
     if (f.project_value) { const n = moneyToNumber(f.project_value); if (n != null) { out.source_stated_value = n; out.source_stated_value_currency = 'USD' } }
     return out
   },

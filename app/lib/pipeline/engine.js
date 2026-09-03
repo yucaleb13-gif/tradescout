@@ -3,6 +3,7 @@ import { getConnector } from '@/app/lib/connectors/registry'
 import { sha256, domainOf } from '@/app/lib/connectors/genericWeb'
 import { checkRobots, respectCrawlDelay } from '@/app/lib/pipeline/robots'
 import { normalizeQuery, describeQuery, tradeMatch, locationMatch, textMatch, dateInRange } from '@/app/lib/connectors/query'
+import { scoreLead, scoreColumns } from '@/app/lib/scoring/score'
 
 const htmlTitleOf = (c) => { const m = String(c || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i); return m ? m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300) : null }
 
@@ -222,12 +223,19 @@ export async function runPipeline({ sourceId, userId, trigger = 'manual', query 
         validation.checks, { retrieval_id: retrievalId })
       if (validation.status === 'rejected') { counters.rejected++; continue } // do NOT create lead
 
+      // ---- SCORE (deterministic; factors verified from normalized fields + evidence, never inferred)
+      const scored = scoreLead(normalized, {
+        evidence: extracted.evidence,
+        trustLevel: source.trust_level,
+        now: new Date(),
+      })
+
       // ---- LEAD
       const { data: lead, error: lErr } = await admin.from('leads').insert({
         search_run_id: runId, primary_source_id: source.id, source_url: extracted.source_url,
         retrieval_id: retrievalId, content_hash: r.content_hash, dedup_hash: dh, is_demo: false,
         verification_status: validation.status, verified_at: validation.status === 'verified' ? new Date().toISOString() : null,
-        ...normalized,
+        ...normalized, ...scoreColumns(scored),
       }).select('id').single()
       if (lErr) { await log(runId, 'lead', 'fail', `Insert failed: ${lErr.message}`, {}, { retrieval_id: retrievalId }); counters.rejected++; continue }
 

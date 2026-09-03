@@ -175,6 +175,7 @@ export const csvDatasetConnector = {
     const cs = dateOnly(row[cols.contract_start]); if (cs) add('timeline_start', cs, 'contract_start')
     const ce = dateOnly(row[cols.contract_end]); if (ce) add('timeline_end', ce, 'contract_end')
     const pub = dateOnly(row[cols.published]); const closingRaw = clean(row[cols.closing])
+    if (pub) fields.published_at = pub
     if (pub || closingRaw) add('timeline_text', [pub && `Published ${pub}`, closingRaw && `Closes ${closingRaw}`].filter(Boolean).join(' · '), pub ? 'published' : 'closing')
     return { fields, evidence, source_url: item.link || retrieval.source_url }
   },
@@ -182,7 +183,7 @@ export const csvDatasetConnector = {
   normalize(extracted) {
     const f = extracted.fields
     const out = { tender_status: f.tender_status || 'unknown' }
-    for (const k of ['project_name', 'project_description', 'project_type', 'trade_category', 'location', 'company_name', 'contact_name', 'contact_email', 'contact_phone', 'bid_deadline', 'timeline_start', 'timeline_end', 'timeline_text']) if (f[k]) out[k] = f[k]
+    for (const k of ['project_name', 'project_description', 'project_type', 'trade_category', 'location', 'company_name', 'contact_name', 'contact_email', 'contact_phone', 'bid_deadline', 'timeline_start', 'timeline_end', 'timeline_text', 'published_at']) if (f[k]) out[k] = f[k]
     return out
   },
 }

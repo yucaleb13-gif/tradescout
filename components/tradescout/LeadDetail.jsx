@@ -8,8 +8,8 @@ import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
-import { tradeLabel, money, UNAVAILABLE, VERIFICATION_STYLES, LEAD_STATUSES } from '@/lib/tradescout/constants'
-import { ArrowLeft, Bookmark, BookmarkCheck, ExternalLink, ShieldCheck, FileText, Building2, MapPin, Calendar, Hash, Sparkles, Loader2, AlertTriangle, RefreshCw } from 'lucide-react'
+import { tradeLabel, money, UNAVAILABLE, VERIFICATION_STYLES, LEAD_STATUSES, SCORE_CATEGORY_STYLES, SCORE_CATEGORY_LABELS } from '@/lib/tradescout/constants'
+import { ArrowLeft, Bookmark, BookmarkCheck, ExternalLink, ShieldCheck, FileText, Building2, MapPin, Calendar, Hash, Sparkles, Loader2, AlertTriangle, RefreshCw, Gauge, Check, Minus } from 'lucide-react'
 import { toast } from 'sonner'
 
 function Field({ label, value, icon: Icon }) {
@@ -78,6 +78,54 @@ function AiCard({ lead, busy, onRun }) {
             <p className="text-[11px] text-muted-foreground">Model {lead.ai_model} · generated {new Date(lead.ai_generated_at).toLocaleString()} · validated against evidence{c.last_attempt ? ` · last regeneration attempt failed (${new Date(c.last_attempt.at).toLocaleString()}), previous summary kept` : ''}</p>
           </>
         )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function ScoreCard({ lead }) {
+  const sf = lead.score_factors
+  const score = lead.lead_score
+  const cat = lead.score_category || (sf && sf.category)
+  if (score == null || !sf) {
+    return (
+      <Card data-testid="score-card">
+        <CardHeader className="pb-2"><CardTitle className="text-base flex items-center gap-2"><Gauge className="h-4 w-4" /> Opportunity Score</CardTitle></CardHeader>
+        <CardContent><p className="text-sm italic text-slate-400">Not yet scored.</p></CardContent>
+      </Card>
+    )
+  }
+  const factors = sf.factors || []
+  return (
+    <Card data-testid="score-card">
+      <CardHeader className="pb-2"><CardTitle className="text-base flex items-center gap-2"><Gauge className="h-4 w-4" /> Opportunity Score</CardTitle></CardHeader>
+      <CardContent className="space-y-4">
+        <div className="flex items-end justify-between">
+          <div><span className="text-3xl font-bold tracking-tight" data-testid="score-value">{score}</span><span className="text-lg text-muted-foreground">/100</span></div>
+          {cat && <Badge variant="outline" className={SCORE_CATEGORY_STYLES[cat]} data-testid="score-category">{SCORE_CATEGORY_LABELS[cat]}</Badge>}
+        </div>
+        <div className="h-2 w-full rounded-full bg-slate-100 overflow-hidden">
+          <div className={`h-full rounded-full ${cat === 'high' ? 'bg-emerald-500' : cat === 'good' ? 'bg-blue-500' : cat === 'moderate' ? 'bg-amber-500' : 'bg-slate-400'}`} style={{ width: `${score}%` }} />
+        </div>
+        <Separator />
+        <div>
+          <p className="text-xs font-medium text-muted-foreground mb-2">Why this opportunity received this score:</p>
+          <ul className="space-y-2" data-testid="score-factors">
+            {factors.map((f) => (
+              <li key={f.key} className="flex items-start gap-2 text-sm">
+                {f.awarded
+                  ? <span className="mt-0.5 inline-flex items-center rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] font-semibold text-emerald-700 tabular-nums">+{f.points}</span>
+                  : <span className="mt-0.5 inline-flex items-center rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-semibold text-slate-400 tabular-nums">0</span>}
+                <span className="flex-1">
+                  <span className={f.awarded ? 'font-medium' : 'text-slate-400'}>{f.label}</span>
+                  <span className="block text-[11px] text-muted-foreground">{f.reason}</span>
+                </span>
+                {f.awarded ? <Check className="h-3.5 w-3.5 text-emerald-500 shrink-0 mt-1" /> : <Minus className="h-3.5 w-3.5 text-slate-300 shrink-0 mt-1" />}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <p className="text-[11px] text-muted-foreground">Deterministic, evidence-based score. Factors that cannot be verified from the source earn zero — nothing is inferred or AI-generated.</p>
       </CardContent>
     </Card>
   )
@@ -199,10 +247,10 @@ export default function LeadDetail({ id, onBack }) {
               <div><div className="text-xs text-muted-foreground flex items-center gap-1">Estimated trade opportunity <Badge variant="outline" className="text-[10px]">estimate</Badge></div>
                 <p className={est ? 'text-lg font-semibold text-amber-700' : 'text-sm italic text-slate-400'}>{est || UNAVAILABLE}</p>
                 {lead.estimation_method && <p className="text-[11px] text-muted-foreground mt-1">Method: {lead.estimation_method.replace(/_/g, ' ')}{lead.estimation_confidence != null ? ` · confidence ${Math.round(lead.estimation_confidence * 100)}%` : ''}</p>}</div>
-              <Separator />
-              <div><p className="text-xs text-muted-foreground">Lead score</p><p className="text-lg font-semibold">{lead.lead_score ?? UNAVAILABLE}</p></div>
             </CardContent>
           </Card>
+
+          <ScoreCard lead={lead} />
 
           <Card>
             <CardHeader><CardTitle className="text-base">Source</CardTitle></CardHeader>

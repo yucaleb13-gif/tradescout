@@ -6,6 +6,7 @@ import { listConnectors } from '@/app/lib/connectors/registry'
 import { runDueSources, listDueSources, ensureScheduler } from '@/app/lib/pipeline/scheduler'
 import { purgeSource, purgeRun } from '@/app/lib/pipeline/purge'
 import { processLeadAi, processLeadsAi, listPendingAiLeads } from '@/app/lib/ai/grounded'
+import { scoreLead, scoreColumns } from '@/app/lib/scoring/score'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -242,6 +243,33 @@ export async function POST(request, context) {
     }
   }
 
+  // -------- RE-SCORE leads deterministically (used after a scoring-model change; never touches AI/factual fields)
+  if (path === 'admin/rescore') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    try {
+      let q = admin.from('leads').select('*, source:sources(trust_level)')
+      if (body.source_id) q = q.eq('primary_source_id', body.source_id)
+      if (body.lead_id) q = q.eq('id', body.lead_id)
+      const { data: rows } = await q
+      const leads = rows || []
+      const ids = leads.map((l) => l.id)
+      const evByLead = {}
+      if (ids.length) {
+        const { data: ev } = await admin.from('lead_evidence').select('id, lead_id, field_name').in('lead_id', ids)
+        for (const e of ev || []) (evByLead[e.lead_id] ||= []).push(e)
+      }
+      let scored = 0
+      const dist = { high: 0, good: 0, moderate: 0, low: 0 }
+      for (const l of leads) {
+        const result = scoreLead(l, { evidence: evByLead[l.id] || [], trustLevel: l.source?.trust_level, now: new Date() })
+        const { error: uErr } = await admin.from('leads').update(scoreColumns(result)).eq('id', l.id)
+        if (!uErr) { scored++; dist[result.category] = (dist[result.category] || 0) + 1 }
+      }
+      return json({ scored, total: leads.length, distribution: dist, model_version: (leads[0] && 'tradescout.score.v1') || 'tradescout.score.v1' })
+    } catch (e) { return json({ error: e.message }, 400) }
+  }
+
   return json({ error: 'Not found' }, 404)
 }
 export async function GET(request, context) {
@@ -304,7 +332,12 @@ export async function GET(request, context) {
     q = q.order('created_at', { ascending: false }).limit(200)
     const { data, error } = await q
     if (error) return json({ error: error.message }, 400)
-    return json(data || [])
+    const rows = (data || []).map((l) => {
+      if (l.score_factors) return l
+      const result = scoreLead(l, { trustLevel: l.source?.trust_level })
+      return { ...l, ...scoreColumns(result) }
+    })
+    return json(rows)
   }
 
   if (parts[0] === 'leads' && parts[1]) {
@@ -318,7 +351,12 @@ export async function GET(request, context) {
       .from('lead_evidence').select('*').eq('lead_id', id).order('created_at', { ascending: true })
     const { data: saved } = await supabase
       .from('saved_leads').select('*').eq('lead_id', id).eq('profile_id', userId).maybeSingle()
-    return json({ ...lead, evidence: evidence || [], saved: saved || null })
+    let out = { ...lead, evidence: evidence || [], saved: saved || null }
+    if (!lead.score_factors) {
+      const result = scoreLead(lead, { evidence: evidence || [], trustLevel: lead.source?.trust_level })
+      out = { ...out, ...scoreColumns(result) }
+    }
+    return json(out)
   }
 
   if (path === 'saved-leads') {
