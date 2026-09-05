@@ -1,12 +1,15 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { api } from '@/lib/tradescout/api'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from '@/components/ui/sheet'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Badge } from '@/components/ui/badge'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from '@/components/ui/dropdown-menu'
-import { HardHat, LayoutDashboard, Search, Bookmark, History, Database, Settings, Menu, LogOut, Terminal } from 'lucide-react'
+import { HardHat, LayoutDashboard, Search, Bookmark, History, Database, Settings, Menu, LogOut, Terminal, Bell, Gauge } from 'lucide-react'
+import { SCORE_CATEGORY_STYLES, tradeLabel } from '@/lib/tradescout/constants'
 import DashboardView from './DashboardView'
 import DiscoverView from './DiscoverView'
 import SavedLeadsView from './SavedLeadsView'
@@ -25,6 +28,82 @@ const NAV = [
   { key: 'admin', label: 'Admin / Debug', icon: Terminal },
   { key: 'settings', label: 'Settings', icon: Settings },
 ]
+
+const SEEN_KEY = 'ts_alerts_seen_at'
+
+function timeAgo(iso) {
+  const d = new Date(iso); const s = Math.floor((Date.now() - d.getTime()) / 1000)
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  if (s < 604800) return `${Math.floor(s / 86400)}d ago`
+  return d.toLocaleDateString()
+}
+
+function NotificationsBell({ onOpenLead }) {
+  const [alerts, setAlerts] = useState(null)
+  const [open, setOpen] = useState(false)
+  const [seenAt, setSeenAt] = useState('1970-01-01T00:00:00.000Z')
+
+  useEffect(() => {
+    const s = typeof window !== 'undefined' ? localStorage.getItem(SEEN_KEY) : null
+    if (s) setSeenAt(s)
+    const load = async () => { try { setAlerts(await api('alerts')) } catch { setAlerts([]) } }
+    load()
+    const t = setInterval(load, 60000)
+    return () => clearInterval(t)
+  }, [])
+
+  const list = alerts || []
+  const unread = list.filter((a) => new Date(a.created_at) > new Date(seenAt)).length
+
+  const onOpenChange = (o) => {
+    setOpen(o)
+    if (o) { const now = new Date().toISOString(); try { localStorage.setItem(SEEN_KEY, now) } catch {} setSeenAt(now) }
+  }
+
+  return (
+    <Popover open={open} onOpenChange={onOpenChange}>
+      <PopoverTrigger asChild>
+        <button className="relative rounded-full p-2 hover:bg-slate-100 transition" data-testid="alerts-bell" aria-label="High-opportunity alerts">
+          <Bell className="h-5 w-5 text-slate-600" />
+          {unread > 0 && (
+            <span data-testid="alerts-badge" className="absolute -top-0.5 -right-0.5 min-w-[18px] h-[18px] px-1 grid place-items-center rounded-full bg-rose-500 text-white text-[10px] font-semibold">
+              {unread > 9 ? '9+' : unread}
+            </span>
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-80 p-0" data-testid="alerts-panel">
+        <div className="flex items-center gap-2 px-4 py-3 border-b">
+          <Gauge className="h-4 w-4 text-emerald-600" />
+          <p className="text-sm font-medium">High-opportunity leads</p>
+          <span className="ml-auto text-xs text-muted-foreground">{list.length}</span>
+        </div>
+        <div className="max-h-80 overflow-y-auto">
+          {alerts === null && <p className="px-4 py-6 text-sm text-muted-foreground text-center">Loading…</p>}
+          {alerts && list.length === 0 && <p className="px-4 py-6 text-sm text-muted-foreground text-center">No high-opportunity leads yet.</p>}
+          {list.map((a) => {
+            const isNew = new Date(a.created_at) > new Date(seenAt)
+            return (
+              <button key={a.id} onClick={() => { setOpen(false); onOpenLead(a.id) }}
+                className="w-full text-left px-4 py-3 border-b last:border-0 hover:bg-slate-50 transition flex gap-3">
+                {isNew && <span className="mt-1.5 h-2 w-2 rounded-full bg-rose-500 shrink-0" />}
+                <span className={`flex-1 min-w-0 ${isNew ? '' : 'pl-5'}`}>
+                  <span className="flex items-center gap-2">
+                    <span className="text-sm font-medium truncate">{a.project_name || 'Untitled project'}</span>
+                    <Badge variant="outline" className={`text-[10px] shrink-0 ${SCORE_CATEGORY_STYLES.high}`}>{a.lead_score}/100</Badge>
+                  </span>
+                  <span className="block text-[11px] text-muted-foreground truncate">{tradeLabel(a.trade_category) || '—'} · {a.location || 'Location N/A'} · {timeAgo(a.created_at)}</span>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  )
+}
 
 export default function Shell({ auth, refreshAuth }) {
   const [view, setView] = useState('dashboard')
@@ -91,7 +170,8 @@ export default function Shell({ auth, refreshAuth }) {
             </SheetContent>
           </Sheet>
           <h1 className="font-semibold">{title}</h1>
-          <div className="ml-auto">
+          <div className="ml-auto flex items-center gap-1">
+            <NotificationsBell onOpenLead={openLead} />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button className="flex items-center gap-2"><Avatar className="h-8 w-8"><AvatarFallback className="bg-slate-900 text-white text-xs">{initials}</AvatarFallback></Avatar></button>

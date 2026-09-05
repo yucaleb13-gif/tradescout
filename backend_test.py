@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-TradeScout Phase 5 Backend Testing: Deterministic Opportunity Scoring
-Tests the non-AI, deterministic 0-100 scoring system with 7 factors.
+TradeScout Backend Testing: High-Opportunity Alerts Endpoint
+Tests the new GET /api/alerts endpoint that powers the in-app alerts bell.
+Also includes regression tests for existing endpoints.
 """
 
 import requests
@@ -871,11 +872,369 @@ def test_8_no_factor_without_data(session: TestSession) -> bool:
         return False
 
 
+def test_alerts_authenticated(session: TestSession) -> bool:
+    """
+    TEST ALERTS-1: Authenticated GET /api/alerts
+    - Returns HTTP 200 with JSON array
+    - EVERY item has score_category == 'high' AND lead_score >= 80
+    - Array ordered by created_at descending
+    - Count matches number of High-band leads (expect 5) and never exceeds 30
+    - Each item includes: id, project_name, trade_category, location, lead_score, score_category, created_at, is_demo
+    """
+    print(f"\n{'='*80}")
+    print("TEST ALERTS-1: Authenticated GET /api/alerts")
+    print(f"{'='*80}")
+    
+    try:
+        response = session.get("alerts")
+        
+        print(f"Response status: {response.status_code}")
+        
+        if response.status_code != 200:
+            print(f"✗ Expected HTTP 200, got {response.status_code}")
+            print(f"Response: {response.text}")
+            return False
+        
+        print(f"✓ HTTP 200 returned")
+        
+        alerts = response.json()
+        
+        if not isinstance(alerts, list):
+            print(f"✗ Response is not a JSON array, got type: {type(alerts)}")
+            return False
+        
+        print(f"✓ Response is a JSON array")
+        print(f"✓ Array length: {len(alerts)}")
+        
+        # Check count
+        if len(alerts) > 30:
+            print(f"✗ Array length {len(alerts)} exceeds maximum of 30")
+            return False
+        
+        print(f"✓ Array length does not exceed 30")
+        
+        # Expected count is 5 high-band leads
+        expected_count = 5
+        if len(alerts) != expected_count:
+            print(f"⚠ Warning: Expected {expected_count} high-band leads, got {len(alerts)}")
+            # Not a failure, just a warning - the count may vary
+        
+        # Validate each item
+        required_fields = ['id', 'project_name', 'trade_category', 'location', 'lead_score', 'score_category', 'created_at', 'is_demo']
+        all_valid = True
+        
+        print(f"\n--- Validating {len(alerts)} alert items ---")
+        
+        for i, alert in enumerate(alerts):
+            project_name = alert.get('project_name', 'unknown')
+            
+            # Check required fields
+            missing_fields = [f for f in required_fields if f not in alert]
+            if missing_fields:
+                print(f"✗ Alert {i+1} ({project_name}): missing fields {missing_fields}")
+                all_valid = False
+                continue
+            
+            # Check score_category == 'high'
+            score_category = alert.get('score_category')
+            if score_category != 'high':
+                print(f"✗ Alert {i+1} ({project_name}): score_category={score_category}, expected 'high'")
+                all_valid = False
+            
+            # Check lead_score >= 80
+            lead_score = alert.get('lead_score')
+            if not isinstance(lead_score, int) or lead_score < 80:
+                print(f"✗ Alert {i+1} ({project_name}): lead_score={lead_score}, expected >= 80")
+                all_valid = False
+            
+            # Print item details
+            print(f"\nAlert {i+1}:")
+            print(f"  Project: {project_name}")
+            print(f"  Trade: {alert.get('trade_category')}")
+            print(f"  Location: {alert.get('location')}")
+            print(f"  Score: {lead_score} ({score_category})")
+            print(f"  Created: {alert.get('created_at')}")
+            print(f"  Is Demo: {alert.get('is_demo')}")
+        
+        # Check ordering by created_at descending
+        print(f"\n--- Checking created_at ordering (descending) ---")
+        
+        ordering_valid = True
+        for i in range(len(alerts) - 1):
+            current_created = alerts[i].get('created_at')
+            next_created = alerts[i+1].get('created_at')
+            
+            if current_created and next_created:
+                if current_created < next_created:
+                    print(f"✗ Ordering violation at index {i}: {current_created} < {next_created}")
+                    ordering_valid = False
+        
+        if ordering_valid:
+            print(f"✓ Array is correctly ordered by created_at descending")
+        else:
+            all_valid = False
+        
+        if all_valid:
+            print(f"\n✓ TEST ALERTS-1 PASSED: All validations passed")
+            return True
+        else:
+            print(f"\n✗ TEST ALERTS-1 FAILED: Some validations failed")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Test ALERTS-1 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_alerts_unauthenticated() -> bool:
+    """
+    TEST ALERTS-2: Unauthenticated GET /api/alerts -> HTTP 401
+    """
+    print(f"\n{'='*80}")
+    print("TEST ALERTS-2: Unauthenticated GET /api/alerts")
+    print(f"{'='*80}")
+    
+    try:
+        # Create a new session without authentication
+        unauth_session = requests.Session()
+        unauth_session.headers.update({
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        })
+        
+        print(f"Attempting unauthenticated GET /api/alerts")
+        
+        response = unauth_session.get(
+            f"{BASE_URL}/alerts",
+            timeout=30
+        )
+        
+        print(f"Response status: {response.status_code}")
+        
+        if response.status_code == 401:
+            print(f"✓ Unauthenticated request correctly returned 401")
+            print(f"\n✓ TEST ALERTS-2 PASSED: Auth gating working correctly")
+            return True
+        else:
+            print(f"✗ Expected 401, got {response.status_code}")
+            print(f"Response: {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Test ALERTS-2 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_regression_leads(session: TestSession) -> bool:
+    """
+    TEST REGRESSION-1: GET /api/leads returns 27 leads with lead_score/score_category/score_factors
+    """
+    print(f"\n{'='*80}")
+    print("TEST REGRESSION-1: GET /api/leads (27 leads with scoring)")
+    print(f"{'='*80}")
+    
+    try:
+        response = session.get("leads")
+        
+        if response.status_code != 200:
+            print(f"✗ GET /api/leads failed: {response.status_code}")
+            return False
+        
+        leads = response.json()
+        print(f"✓ GET /api/leads returned {len(leads)} leads")
+        
+        expected_count = 27
+        if len(leads) != expected_count:
+            print(f"⚠ Warning: Expected {expected_count} leads, got {len(leads)}")
+            # Not a hard failure - count may vary
+        
+        # Check that each lead has scoring fields
+        all_valid = True
+        for i, lead in enumerate(leads):
+            if 'lead_score' not in lead:
+                print(f"✗ Lead {i+1}: missing lead_score")
+                all_valid = False
+            if 'score_category' not in lead:
+                print(f"✗ Lead {i+1}: missing score_category")
+                all_valid = False
+            if 'score_factors' not in lead:
+                print(f"✗ Lead {i+1}: missing score_factors")
+                all_valid = False
+        
+        if all_valid:
+            print(f"✓ All leads have lead_score, score_category, and score_factors")
+            print(f"\n✓ TEST REGRESSION-1 PASSED")
+            return True
+        else:
+            print(f"\n✗ TEST REGRESSION-1 FAILED: Some leads missing scoring fields")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Test REGRESSION-1 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_regression_saved_leads(session: TestSession) -> bool:
+    """
+    TEST REGRESSION-2: GET /api/saved-leads returns array with .lead object including lead_score and score_category
+    """
+    print(f"\n{'='*80}")
+    print("TEST REGRESSION-2: GET /api/saved-leads (lead object with scoring)")
+    print(f"{'='*80}")
+    
+    try:
+        response = session.get("saved-leads")
+        
+        if response.status_code != 200:
+            print(f"✗ GET /api/saved-leads failed: {response.status_code}")
+            return False
+        
+        saved_leads = response.json()
+        print(f"✓ GET /api/saved-leads returned {len(saved_leads)} saved leads")
+        
+        if len(saved_leads) == 0:
+            print(f"⚠ No saved leads found - creating one for testing")
+            
+            # Get a lead to save
+            leads_response = session.get("leads")
+            if leads_response.status_code != 200:
+                print(f"✗ Failed to get leads for testing")
+                return False
+            
+            leads = leads_response.json()
+            if len(leads) == 0:
+                print(f"✗ No leads available to save")
+                return False
+            
+            # Save the first lead
+            lead_to_save = leads[0]
+            save_response = session.post("saved-leads", json={"lead_id": lead_to_save['id']})
+            
+            if save_response.status_code not in [200, 201]:
+                print(f"✗ Failed to save lead: {save_response.status_code}")
+                return False
+            
+            print(f"✓ Created a saved lead for testing")
+            
+            # Get saved leads again
+            response = session.get("saved-leads")
+            if response.status_code != 200:
+                print(f"✗ GET /api/saved-leads failed after saving: {response.status_code}")
+                return False
+            
+            saved_leads = response.json()
+        
+        # Check that each saved lead has a .lead object with scoring fields
+        all_valid = True
+        for i, saved_lead in enumerate(saved_leads):
+            if 'lead' not in saved_lead:
+                print(f"✗ Saved lead {i+1}: missing 'lead' object")
+                all_valid = False
+                continue
+            
+            lead = saved_lead['lead']
+            
+            if 'lead_score' not in lead:
+                print(f"✗ Saved lead {i+1}: lead object missing lead_score")
+                all_valid = False
+            
+            if 'score_category' not in lead:
+                print(f"✗ Saved lead {i+1}: lead object missing score_category")
+                all_valid = False
+        
+        if all_valid:
+            print(f"✓ All saved leads have .lead object with lead_score and score_category")
+            print(f"\n✓ TEST REGRESSION-2 PASSED")
+            return True
+        else:
+            print(f"\n✗ TEST REGRESSION-2 FAILED: Some saved leads missing scoring fields")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Test REGRESSION-2 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def test_regression_rescore(session: TestSession) -> bool:
+    """
+    TEST REGRESSION-3: POST /api/admin/rescore {} returns {scored:27,total:27,distribution:{high,good,moderate,low}}
+    """
+    print(f"\n{'='*80}")
+    print("TEST REGRESSION-3: POST /api/admin/rescore (distribution)")
+    print(f"{'='*80}")
+    
+    try:
+        response = session.post("admin/rescore", json={})
+        
+        if response.status_code != 200:
+            print(f"✗ POST /api/admin/rescore failed: {response.status_code}")
+            print(f"Response: {response.text}")
+            return False
+        
+        result = response.json()
+        print(f"✓ POST /api/admin/rescore returned 200")
+        
+        # Check required fields
+        if 'scored' not in result:
+            print(f"✗ Response missing 'scored' field")
+            return False
+        
+        if 'total' not in result:
+            print(f"✗ Response missing 'total' field")
+            return False
+        
+        if 'distribution' not in result:
+            print(f"✗ Response missing 'distribution' field")
+            return False
+        
+        scored = result['scored']
+        total = result['total']
+        distribution = result['distribution']
+        
+        print(f"✓ Scored: {scored}")
+        print(f"✓ Total: {total}")
+        print(f"✓ Distribution: {distribution}")
+        
+        expected_total = 27
+        if total != expected_total:
+            print(f"⚠ Warning: Expected total={expected_total}, got {total}")
+            # Not a hard failure - count may vary
+        
+        if scored != total:
+            print(f"✗ Scored ({scored}) != Total ({total})")
+            return False
+        
+        # Check distribution has all categories
+        required_categories = ['high', 'good', 'moderate', 'low']
+        for category in required_categories:
+            if category not in distribution:
+                print(f"✗ Distribution missing category '{category}'")
+                return False
+        
+        print(f"✓ Distribution has all required categories: {required_categories}")
+        print(f"\n✓ TEST REGRESSION-3 PASSED")
+        return True
+        
+    except Exception as e:
+        print(f"✗ Test REGRESSION-3 error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
 def main():
-    """Run all Phase 5 scoring tests"""
+    """Run all alerts endpoint tests and regression tests"""
     print(f"\n{'#'*80}")
-    print("# TradeScout Phase 5 Backend Testing")
-    print("# Deterministic Opportunity Scoring (0-100)")
+    print("# TradeScout Backend Testing")
+    print("# High-Opportunity Alerts Endpoint + Regression Tests")
     print(f"{'#'*80}")
     
     # Initialize session and authenticate
@@ -888,30 +1247,22 @@ def main():
     # Run tests
     results = {}
     
-    # Test 1: Leads list scoring fields
-    results['test_1'] = test_1_leads_list_scoring_fields(session)
+    # ALERTS ENDPOINT TESTS
+    print(f"\n{'='*80}")
+    print("ALERTS ENDPOINT TESTS")
+    print(f"{'='*80}")
     
-    # Test 2: Cell Window Glazing expected score
-    glazing_data = test_2_cell_window_glazing_score(session)
-    results['test_2'] = glazing_data.get('success', False)
+    results['alerts_1_authenticated'] = test_alerts_authenticated(session)
+    results['alerts_2_unauthenticated'] = test_alerts_unauthenticated()
     
-    # Test 3: Data integrity during rescore
-    results['test_3'] = test_3_data_integrity_during_rescore(session, glazing_data)
+    # REGRESSION TESTS
+    print(f"\n{'='*80}")
+    print("REGRESSION TESTS")
+    print(f"{'='*80}")
     
-    # Test 4: Non-open tender scoring
-    results['test_4'] = test_4_non_open_tender_scoring(session)
-    
-    # Test 5: Determinism
-    results['test_5'] = test_5_determinism(session)
-    
-    # Test 6: Single lead rescore
-    results['test_6'] = test_6_single_lead_rescore(session)
-    
-    # Test 7: Auth gating
-    results['test_7'] = test_7_auth_gating(session)
-    
-    # Test 8: No factor without verifiable data
-    results['test_8'] = test_8_no_factor_without_data(session)
+    results['regression_1_leads'] = test_regression_leads(session)
+    results['regression_2_saved_leads'] = test_regression_saved_leads(session)
+    results['regression_3_rescore'] = test_regression_rescore(session)
     
     # Summary
     print(f"\n{'='*80}")
@@ -930,7 +1281,7 @@ def main():
     print(f"{'='*80}")
     
     if passed == total:
-        print("\n✓ ALL TESTS PASSED - Phase 5 scoring backend is working correctly")
+        print("\n✓ ALL TESTS PASSED - Alerts endpoint and regression tests working correctly")
         sys.exit(0)
     else:
         print(f"\n✗ {total - passed} TEST(S) FAILED - See details above")

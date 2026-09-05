@@ -9,9 +9,19 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from '@/components/ui/dialog'
-import { tradeLabel, money, LEAD_STATUSES, STATUS_STYLES } from '@/lib/tradescout/constants'
+import { tradeLabel, money, LEAD_STATUSES, STATUS_STYLES, SCORE_CATEGORY_STYLES, SCORE_CATEGORY_LABELS, scoreCategoryOf } from '@/lib/tradescout/constants'
 import { Trash2, StickyNote, Bookmark, List, Columns } from 'lucide-react'
 import { toast } from 'sonner'
+
+const ScoreBadge = ({ lead, className = '' }) => {
+  if (!lead || lead.lead_score == null) return null
+  const c = lead.score_category || scoreCategoryOf(lead.lead_score)
+  return (
+    <Badge variant="outline" className={`${SCORE_CATEGORY_STYLES[c] || ''} ${className}`}>
+      {lead.lead_score}/100 · {SCORE_CATEGORY_LABELS[c] || 'Unscored'}
+    </Badge>
+  )
+}
 
 export default function SavedLeadsView({ onOpenLead }) {
   const [items, setItems] = useState(null)
@@ -80,6 +90,7 @@ export default function SavedLeadsView({ onOpenLead }) {
                       <div className="flex items-center gap-2">
                         <span className="font-medium truncate">{l.project_name || 'Untitled project'}</span>
                         {l.is_demo && <Badge variant="outline" className="text-[10px] border-amber-300 text-amber-700">DEMO</Badge>}
+                        <ScoreBadge lead={l} className="text-[10px]" />
                       </div>
                       <p className="text-xs text-muted-foreground mt-0.5">{tradeLabel(l.trade_category) || '—'} · {l.location || 'Location N/A'} · {money(l.estimated_trade_value, l.estimated_trade_value_currency) || 'value N/A'}</p>
                       {row.notes && <p className="text-xs text-slate-500 mt-1 line-clamp-1"><StickyNote className="h-3 w-3 inline mr-1" />{row.notes}</p>}
@@ -122,7 +133,10 @@ export default function SavedLeadsView({ onOpenLead }) {
                               <span className="text-sm font-medium leading-tight line-clamp-2">{l.project_name || 'Untitled project'}</span>
                             </div>
                             <p className="text-[11px] text-muted-foreground mt-1">{tradeLabel(l.trade_category) || '—'} · {money(l.estimated_trade_value, l.estimated_trade_value_currency) || 'value N/A'}</p>
-                            {l.is_demo && <Badge variant="outline" className="text-[9px] border-amber-300 text-amber-700 mt-1">DEMO</Badge>}
+                            <div className="flex items-center gap-1 mt-1">
+                              <ScoreBadge lead={l} className="text-[9px]" />
+                              {l.is_demo && <Badge variant="outline" className="text-[9px] border-amber-300 text-amber-700">DEMO</Badge>}
+                            </div>
                           </button>
                           <div className="flex items-center gap-1 pt-1 border-t">
                             <Select value={row.status} onValueChange={(v) => setStatus(row, v)}>

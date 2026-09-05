@@ -370,6 +370,20 @@ export async function GET(request, context) {
     return json(data || [])
   }
 
+  // High-opportunity alerts: most recent leads that scored in the High band (>=80).
+  if (path === 'alerts') {
+    const userId = await getUserId(supabase)
+    if (!userId) return json({ error: 'Unauthorized' }, 401)
+    const { data, error } = await supabase
+      .from('leads')
+      .select('id, project_name, trade_category, location, lead_score, score_category, created_at, is_demo')
+      .eq('score_category', 'high')
+      .order('created_at', { ascending: false })
+      .limit(30)
+    if (error) return json({ error: error.message }, 400)
+    return json(data || [])
+  }
+
   if (path === 'search-history') {
     const userId = await getUserId(supabase)
     if (!userId) return json({ error: 'Unauthorized' }, 401)
